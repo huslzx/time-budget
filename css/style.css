@@ -22,6 +22,8 @@
   --danger-fill: #d03b3b;
   --warn: #fab219;
   --good: #3fbf3f;
+  --grid: #2c2c2a; /* лінії сітки на графіку */
+  --baseline: #383835; /* нульова лінія графіка */
   --radius: 16px;
   --radius-sm: 12px;
   --font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
@@ -182,7 +184,7 @@ button {
   background: var(--raised);
 }
 
-@media (min-width: 640px) {
+@media (min-width: 720px) {
   .wrap {
     padding-bottom: 48px;
   }
@@ -288,6 +290,13 @@ button {
   color: var(--text);
 }
 
+.icon-btn:disabled {
+  background: transparent;
+  color: var(--text-2);
+  opacity: 0.35;
+  cursor: default;
+}
+
 .link {
   min-height: 44px;
   padding: 8px;
@@ -316,6 +325,10 @@ button {
 
 .day-title h1 {
   font-size: 26px;
+}
+
+.day-title h2 {
+  font-size: 22px;
 }
 
 .day-title p {
@@ -912,6 +925,354 @@ button {
   margin-top: 8px;
 }
 
+/* ---------- Підсумки ---------- */
+
+/* Перемикач «День / Тиждень» */
+.switch {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  margin-bottom: 16px;
+  padding: 4px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+}
+
+.switch button {
+  min-height: 40px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-2);
+  font-weight: 600;
+}
+
+.switch button[aria-pressed="true"] {
+  background: var(--raised);
+  color: var(--text);
+}
+
+.sum-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 4px 12px;
+  margin-bottom: 14px;
+}
+
+.sum-legend {
+  display: inline-flex;
+  gap: 12px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.sum-list {
+  display: grid;
+  gap: 16px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.sum-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.sum-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.sum-value {
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.sum-value small {
+  margin-left: 4px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+/* Смужка: заливка — зроблене, біла риска — план */
+.sum-bar {
+  position: relative;
+  height: 10px;
+  margin: 8px 0 6px;
+  background: var(--raised);
+  border-radius: 0 4px 4px 0;
+}
+
+.sum-fact {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  min-width: 2px;
+  background: var(--cat);
+  border-radius: 0 4px 4px 0;
+}
+
+.sum-plan {
+  position: absolute;
+  top: -4px;
+  bottom: -4px;
+  width: 2px;
+  margin-left: -1px;
+  background: var(--text);
+  border-radius: 1px;
+}
+
+.sum-sub {
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.sum-notes {
+  margin-top: 16px;
+}
+
+.lg.fact {
+  background: var(--text-2);
+}
+
+.lg.plan-mark {
+  width: 2px;
+  height: 12px;
+  vertical-align: -2px;
+  background: var(--text);
+  border-radius: 1px;
+}
+
+.lg.plan-tick {
+  height: 2px;
+  vertical-align: 3px;
+  background: var(--text);
+}
+
+.lg.budget-line {
+  height: 0;
+  vertical-align: 3px;
+  border-top: 1px dashed rgba(255, 255, 255, 0.5);
+  border-radius: 0;
+}
+
+/* Графік тижня. Висота 180 px — лише для стовпчиків; підписи днів додаються знизу */
+.chart-card h3 {
+  margin-bottom: 12px;
+}
+
+.wk-chart {
+  position: relative;
+  padding-top: 8px;
+}
+
+.wk-grid {
+  position: absolute;
+  top: 8px;
+  left: 0;
+  right: 0;
+  height: 180px;
+}
+
+.wk-line {
+  position: absolute;
+  left: 28px;
+  right: 0;
+  border-top: 1px solid var(--grid);
+}
+
+.wk-line:first-child {
+  border-top-color: var(--baseline);
+}
+
+.wk-line span {
+  position: absolute;
+  right: 100%;
+  margin-right: 8px;
+  transform: translateY(-50%);
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.wk-cols {
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  margin-left: 28px;
+}
+
+.wk-col {
+  display: grid;
+  grid-template-rows: 180px auto;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+}
+
+.wk-plot {
+  position: relative;
+  display: block;
+  border-radius: 8px 8px 0 0;
+}
+
+.wk-col:hover .wk-plot,
+.wk-col.picked .wk-plot {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.wk-budget {
+  position: absolute;
+  left: 0;
+  right: 0;
+  border-top: 1px dashed rgba(255, 255, 255, 0.35);
+}
+
+/* Стовпчик: частини категорій знизу вгору, між ними 2 px проміжку, верх заокруглений */
+.wk-stack {
+  position: absolute;
+  bottom: 0;
+  left: 50%;
+  display: flex;
+  flex-direction: column-reverse;
+  gap: 2px;
+  width: min(24px, 60%);
+  overflow: hidden;
+  transform: translateX(-50%);
+  border-radius: 4px 4px 0 0;
+}
+
+.wk-stack i {
+  flex: 1 1 0;
+  min-height: 0;
+  background: var(--cat);
+}
+
+.wk-plan {
+  position: absolute;
+  left: 50%;
+  width: min(34px, 84%);
+  height: 2px;
+  margin-bottom: -1px;
+  transform: translateX(-50%);
+  background: var(--text);
+  border-radius: 1px;
+}
+
+.wk-label {
+  display: grid;
+  padding: 6px 0 2px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.25;
+  text-align: center;
+}
+
+.wk-label b {
+  color: var(--text-2);
+  font-weight: 600;
+}
+
+.wk-col.today .wk-label,
+.wk-col.today .wk-label b {
+  color: var(--text);
+}
+
+.wk-detail {
+  min-height: 44px;
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--raised);
+  color: var(--text-2);
+  font-size: 14px;
+}
+
+.wk-detail-head {
+  display: block;
+}
+
+.wk-detail-head b,
+.wk-item b {
+  color: var(--text);
+}
+
+.wk-items {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin-top: 6px;
+}
+
+.wk-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.key {
+  display: inline-block;
+  width: 12px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--cat);
+}
+
+.wk-detail .link.inline {
+  display: block;
+  margin-top: 4px;
+  padding: 0;
+}
+
+.table-card {
+  overflow-x: auto;
+}
+
+.table-card summary {
+  min-height: 32px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.wk-table {
+  width: 100%;
+  margin-top: 12px;
+  border-collapse: collapse;
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+
+.wk-table th,
+.wk-table td {
+  padding: 8px 6px;
+  border-bottom: 1px solid var(--border);
+  text-align: right;
+}
+
+.wk-table th:first-child {
+  text-align: left;
+}
+
+.wk-table thead th {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
 /* ---------- Налаштування ---------- */
 
 .page-title {
@@ -1291,7 +1652,7 @@ dialog::backdrop {
   }
 }
 
-@media (min-width: 640px) {
+@media (min-width: 720px) {
   .toasts {
     bottom: 24px;
   }

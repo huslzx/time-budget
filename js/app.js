@@ -27,12 +27,19 @@
     form: null, // відкрита форма: { taskId, markDone, ackOverlap } або { categoryId }
     timeline: null, // межі намальованої шкали дня: { key, from, to }
     hiddenAt: null, // коли сторінку сховали (перейшли на іншу вкладку чи програму)
+    summaryMode: 'day', // «Підсумки»: 'day' або 'week'
+    weekEnd: '', // останній день тижня, який показують «Підсумки»
+    weekPick: null, // день, вибраний на графіку тижня
+    weekTableOpen: false, // чи розгорнута таблиця по днях
   };
 
   const TABS = [
     { id: 'today', label: 'Сьогодні', icon: 'sun' },
+    { id: 'summary', label: 'Підсумки', icon: 'chart' },
     { id: 'settings', label: 'Налаштування', icon: 'sliders' },
   ];
+
+  const WEEK_HINT = 'Наведи на день або натисни на нього, щоб побачити, з чого він склався.';
 
   const KIND_LABEL = { done: 'виконано', planned: 'заплановано', running: 'іде зараз' };
 
@@ -40,6 +47,7 @@
   const ICONS = {
     hourglass: '<path d="M5 22h14"/><path d="M5 2h14"/><path d="M17 22v-4.172a2 2 0 0 0-.586-1.414L12 12l-4.414 4.414A2 2 0 0 0 7 17.828V22"/><path d="M7 2v4.172a2 2 0 0 0 .586 1.414L12 12l4.414-4.414A2 2 0 0 0 17 6.172V2"/>',
     sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/>',
+    chart: '<path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/>',
     sliders: '<path d="M21 4h-7"/><path d="M10 4H3"/><path d="M21 12h-9"/><path d="M8 12H3"/><path d="M21 20h-5"/><path d="M12 20H3"/><path d="M14 2v4"/><path d="M8 10v4"/><path d="M16 18v4"/>',
     left: '<path d="m15 18-6-6 6-6"/>',
     right: '<path d="m9 18 6-6-6-6"/>',
@@ -178,7 +186,9 @@
 
   function render() {
     const focused = app.contains(document.activeElement) ? focusKey(document.activeElement) : null;
-    const main = state.tab === 'settings' ? renderSettings() : renderToday();
+    const main = state.tab === 'settings' ? renderSettings()
+      : state.tab === 'summary' ? renderSummary()
+        : renderToday();
     app.innerHTML = renderTopbar() + '<main class="wrap" id="main">' + renderSaveError() + main + '</main>';
     restoreFocus(focused);
     updateLive();
@@ -223,22 +233,29 @@
 
   /* ---------- Вкладка «Сьогодні» ---------- */
 
-  function renderToday() {
-    const key = state.day;
+  // Назва дня зі стрілками ‹ ›. tag — 'h1' на «Сьогодні», 'h2' у «Підсумках»
+  function renderDayHead(key, tag) {
     const tKey = todayKey();
     const rel = T.relativeDay(key, tKey);
-    const item = C.scheduleFor(state.data.schedules, key);
-    const budget = C.dayBudget(state.data.schedules, key);
     return `
       <section class="day-head">
         <button type="button" class="icon-btn" data-action="day-prev" aria-label="Попередній день">${icon('left')}</button>
         <div class="day-title">
-          <h1>${esc(rel || capitalize(T.WEEKDAYS[T.weekday(key)]))}</h1>
+          <${tag}>${esc(rel || capitalize(T.WEEKDAYS[T.weekday(key)]))}</${tag}>
           <p>${esc(rel ? T.formatDate(key) : T.formatDayMonth(key, tKey))}</p>
         </div>
         <button type="button" class="icon-btn" data-action="day-next" aria-label="Наступний день">${icon('right')}</button>
       </section>
-      ${key !== tKey ? '<p class="center"><button type="button" class="link" data-action="day-today">Повернутися до сьогодні</button></p>' : ''}
+      ${key !== tKey ? '<p class="center"><button type="button" class="link" data-action="day-today">Повернутися до сьогодні</button></p>' : ''}`;
+  }
+
+  function renderToday() {
+    const key = state.day;
+    const tKey = todayKey();
+    const item = C.scheduleFor(state.data.schedules, key);
+    const budget = C.dayBudget(state.data.schedules, key);
+    return `
+      ${renderDayHead(key, 'h1')}
       <p class="schedule-line">Підйом ${item.wake} · Відбій ${item.sleep} · Бюджет дня ${T.formatDuration(budget)}</p>
       ${renderTimerCard()}
       <section class="stats">
@@ -981,6 +998,260 @@
     toast('Справу видалено');
   }
 
+  /* ---------- Вкладка «Підсумки» ---------- */
+
+  function renderSummary() {
+    const modes = [['day', 'День'], ['week', 'Тиждень']].map(([id, label]) => `
+      <button type="button" data-action="summary-mode" data-id="${id}" aria-pressed="${state.summaryMode === id}">${label}</button>`).join('');
+    return `
+      <h1 class="page-title">Підсумки</h1>
+      <div class="switch" role="group" aria-label="Підсумок за">${modes}</div>
+      ${state.summaryMode === 'week' ? renderWeekSummary() : renderDaySummary()}`;
+  }
+
+  // Невелика картка з числом, як «Вільний бюджет» на головній
+  function tile(label, valueHTML, hint, tone = '') {
+    return `
+      <div class="stat${tone ? ' ' + tone : ''}">
+        <div class="stat-label">${label}</div>
+        <div class="stat-value">${valueHTML}</div>
+        <div class="stat-hint">${esc(hint)}</div>
+      </div>`;
+  }
+
+  // «зроблено на 40 хв менше», «точно за планом»…
+  function diffText(fact, plan) {
+    if (!fact) return 'нічого не зроблено';
+    const diff = fact - plan;
+    if (Math.abs(diff) < T.MINUTE) return 'зроблено точно за планом';
+    return 'зроблено на ' + T.formatDuration(Math.abs(diff)) + (diff > 0 ? ' більше' : ' менше');
+  }
+
+  // Порівняння «план / факт» для категорії. judge = false — день ще не почався, судити рано
+  function compareText(fact, plan, judge) {
+    if (!plan) return 'без плану';
+    const planned = 'план ' + T.formatDuration(plan);
+    return judge ? planned + ' — ' + diffText(fact, plan) : planned;
+  }
+
+  function sumLegend() {
+    return '<span class="sum-legend"><span><i class="lg fact"></i>зроблено</span><span><i class="lg plan-mark"></i>план</span></span>';
+  }
+
+  // Рядки категорій: смужка — зроблене, риска — план. kind: 'day' або 'week'
+  function renderSumRows(rows, kind, budget, judge) {
+    const scaleMax = Math.max(T.MINUTE, ...rows.map((row) => Math.max(row.fact, row.plan)));
+    const pct = (ms) => +((ms / scaleMax) * 100).toFixed(2);
+    return rows.map((row) => {
+      const cat = category(row.categoryId);
+      const value = kind === 'week'
+        ? T.formatDuration(row.average) + ' <small>на день</small>'
+        : T.formatDuration(row.fact) + ' <small>' + C.percentOf(row.fact, budget) + '%</small>';
+      const sub = (kind === 'week' ? 'за тиждень ' + T.formatDuration(row.fact) + ' · ' : '') + compareText(row.fact, row.plan, judge);
+      const label = cat.name + ': зроблено ' + T.formatDuration(row.fact) + ', ' + (row.plan ? 'план ' + T.formatDuration(row.plan) : 'без плану');
+      return `
+        <li class="sum-row" style="--cat:${esc(cat.color)}">
+          <div class="sum-top">
+            <span class="sum-name"><i class="dot"></i>${esc(cat.name)}</span>
+            <span class="sum-value">${value}</span>
+          </div>
+          <div class="sum-bar" role="img" aria-label="${esc(label)}">
+            ${row.fact ? `<span class="sum-fact" style="width:${pct(row.fact)}%"></span>` : ''}
+            ${row.plan ? `<span class="sum-plan" style="left:${pct(row.plan)}%"></span>` : ''}
+          </div>
+          <div class="sum-sub">${esc(sub)}</div>
+        </li>`;
+    }).join('');
+  }
+
+  function renderDaySummary() {
+    const now = Date.now();
+    const key = state.day;
+    const { schedules, tasks, timer } = state.data;
+    const day = C.daySummary(schedules, tasks, key, timer, now);
+    const head = renderDayHead(key, 'h2') + `<p class="schedule-line">Бюджет дня ${T.formatDuration(day.budget)}</p>`;
+    if (!day.rows.length) return head + emptyDaySummary(day);
+    // До початку дня ще рано казати «не зроблено»
+    const judge = day.phase !== 'future' && day.phase !== 'before';
+    const notes = [];
+    if (timer && C.slotOnDay(C.timerSlot(timer, now), key) > 0) notes.push('Враховано таймер, що зараз іде.');
+    if (day.split) notes.push('Справи, що переходять через північ, поділено між днями: тут лише частина цього дня.');
+    notes.push('Відсотки — від бюджету дня, округлені.');
+    const lostKnown = day.lost !== null;
+    return head + `
+      <section class="stats">
+        ${tile('Зроблено', durationHTML(day.fact), C.percentOf(day.fact, day.budget) + '% бюджету дня')}
+        ${tile('Заплановано', durationHTML(day.plan), day.plan ? (judge ? diffText(day.fact, day.plan) : 'на цей день') : 'плану не було')}
+        ${tile('Загублено', lostKnown ? durationHTML(day.lost) : '—',
+          lostKnown ? C.percentOf(day.lost, day.budget) + '% бюджету дня' : 'день ще не настав', lostKnown ? '' : 'quiet')}
+      </section>
+      <section class="card">
+        <div class="sum-head"><h3>По категоріях</h3>${sumLegend()}</div>
+        <ul class="sum-list">${renderSumRows(day.rows, 'day', day.budget, judge)}</ul>
+        <p class="hint sum-notes">${notes.join(' ')}</p>
+      </section>`;
+  }
+
+  function emptyDaySummary(day) {
+    let title = 'Сьогодні ще нічого не записано';
+    let text = day.lost ? 'Загублений час поки що — ' + T.formatDuration(day.lost) + '.' : 'День ще не почався.';
+    if (day.phase === 'future') {
+      title = 'На цей день ще нічого не заплановано';
+      text = 'Додай справи, і тут з’явиться план по категоріях.';
+    } else if (day.phase === 'past') {
+      title = 'Цього дня справ не записано';
+      text = 'Можливо, програмою тоді ще не користувались.';
+    }
+    return `
+      <div class="empty">
+        <p class="empty-title">${title}</p>
+        <p>${esc(text)}</p>
+        <button type="button" class="btn primary" data-action="task-add">${icon('plus')}Додати справу</button>
+      </div>`;
+  }
+
+  function renderWeekSummary() {
+    const now = Date.now();
+    const tKey = todayKey();
+    const endKey = state.weekEnd;
+    const startKey = T.addDays(endKey, -6);
+    const { schedules, tasks, timer } = state.data;
+    const week = C.weekSummary(schedules, tasks, endKey, timer, now);
+    const current = endKey >= tKey;
+    const head = `
+      <section class="day-head">
+        <button type="button" class="icon-btn" data-action="week-prev" aria-label="Попередні 7 днів">${icon('left')}</button>
+        <div class="day-title">
+          <h2>${current ? 'Останні 7 днів' : '7 днів'}</h2>
+          <p>${esc(T.formatDayRange(startKey, endKey, tKey))}</p>
+        </div>
+        <button type="button" class="icon-btn" data-action="week-next" aria-label="Наступні 7 днів" ${current ? 'disabled' : ''}>${icon('right')}</button>
+      </section>
+      ${current ? '' : '<p class="center"><button type="button" class="link" data-action="week-current">До останніх 7 днів</button></p>'}`;
+    if (!week.recordedDays && !week.plan) {
+      return head + `
+        <div class="empty">
+          <p class="empty-title">За ці 7 днів записів немає</p>
+          <p>Підсумок тижня з’явиться, щойно запишеш хоча б одну справу.</p>
+        </div>`;
+    }
+    const n = week.recordedDays;
+    let note = n === 7 ? 'Записи є за всі 7 днів.'
+      : n === 0 ? 'Зроблених справ ще немає — лише плани.'
+        : 'Записи є за ' + n + ' ' + T.plural(n, 'день', 'дні', 'днів') + ' із 7 — середнє рахую лише за ці дні.';
+    if (week.days.some((day) => day.key === tKey && day.fact > 0)) note += ' Сьогоднішній день ще триває.';
+    const notes = ['Середнє на день — це зроблене за тиждень, поділене на дні із записами.'];
+    if (week.days.some((day) => day.split)) notes.push('Справи, що переходять через північ, поділено між днями.');
+    return head + `
+      <p class="schedule-line">${esc(note)}</p>
+      <section class="stats">
+        ${tile('Зроблено в середньому', n ? durationHTML(week.averageFact) : '—', n ? 'на день' : 'ще немає даних', n ? '' : 'quiet')}
+        ${tile('За 7 днів', durationHTML(week.fact), week.plan ? 'план ' + T.formatDuration(week.plan) + ' — ' + diffText(week.fact, week.plan) : 'плану не було')}
+        ${tile('Загублено в середньому', week.averageLost === null ? '—' : durationHTML(week.averageLost),
+          week.averageLost === null ? 'ще немає даних' : 'на день', week.averageLost === null ? 'quiet' : '')}
+      </section>
+      ${renderWeekChart(week)}
+      <section class="card">
+        <div class="sum-head"><h3>По категоріях</h3>${sumLegend()}</div>
+        <ul class="sum-list">${renderSumRows(week.rows, 'week', 0, true)}</ul>
+        <p class="hint sum-notes">${notes.join(' ')}</p>
+      </section>
+      ${renderWeekTable(week)}`;
+  }
+
+  // Стовпчиковий графік: кожен день — стовпчик із частин у кольорах категорій.
+  // Риска над стовпчиком — скільки було заплановано, пунктир — бюджет дня.
+  function renderWeekChart(week) {
+    const tKey = todayKey();
+    const scale = C.chartScale(Math.max(...week.days.map((day) => Math.max(day.fact, day.plan, day.budget))));
+    const pct = (ms) => +((ms / scale.top) * 100).toFixed(3);
+    const order = state.data.categories.map((c) => c.id);
+    const byOrder = (a, b) => order.indexOf(a.categoryId) - order.indexOf(b.categoryId);
+    const grid = [];
+    for (let v = 0; v <= scale.top; v += scale.step) {
+      grid.push(`<div class="wk-line" style="bottom:${pct(v)}%"><span>${v / T.HOUR}</span></div>`);
+    }
+    const columns = week.days.map((day) => {
+      const segments = day.rows.filter((row) => row.fact > 0).sort(byOrder).map((row) => `
+        <i style="--cat:${esc(category(row.categoryId).color)};flex-grow:${Math.max(1, Math.round(row.fact / T.MINUTE))}"></i>`).join('');
+      const picked = state.weekPick === day.key;
+      return `
+        <button type="button" class="wk-col${day.key === tKey ? ' today' : ''}${picked ? ' picked' : ''}" data-action="week-pick"
+          data-id="${day.key}" aria-pressed="${picked}" aria-label="${esc(weekDayLabel(day))}">
+          <span class="wk-plot">
+            <span class="wk-budget" style="bottom:${pct(day.budget)}%"></span>
+            ${day.fact ? `<span class="wk-stack" style="height:${pct(day.fact)}%">${segments}</span>` : ''}
+            ${day.plan ? `<span class="wk-plan" style="bottom:${pct(day.plan)}%"></span>` : ''}
+          </span>
+          <span class="wk-label"><b>${T.WEEKDAYS_SHORT[T.weekday(day.key)]}</b>${Number(day.key.slice(8))}</span>
+        </button>`;
+    }).join('');
+    const used = new Set(week.days.flatMap((day) => day.rows.filter((row) => row.fact > 0).map((row) => row.categoryId)));
+    const legend = state.data.categories.filter((c) => used.has(c.id))
+      .map((c) => `<span><i class="lg" style="background:${esc(c.color)}"></i>${esc(c.name)}</span>`).join('');
+    return `
+      <section class="card chart-card">
+        <h3>Зроблено по днях, год</h3>
+        <div class="wk-chart">
+          <div class="wk-grid" aria-hidden="true">${grid.join('')}</div>
+          <div class="wk-cols">${columns}</div>
+        </div>
+        <div class="tl-legend">${legend}<span><i class="lg plan-tick"></i>план на день</span><span><i class="lg budget-line"></i>бюджет дня</span></div>
+        <p class="wk-detail" id="wk-detail">${state.weekPick ? weekDetailHTML(state.weekPick) : WEEK_HINT}</p>
+      </section>`;
+  }
+
+  // Опис дня словами — для програм читання з екрана
+  function weekDayLabel(day) {
+    const parts = day.rows.filter((row) => row.fact > 0)
+      .map((row) => category(row.categoryId).name + ' ' + T.formatDuration(row.fact));
+    let text = T.formatDate(day.key) + ': ';
+    text += day.fact ? 'зроблено ' + T.formatDuration(day.fact) + ' (' + parts.join(', ') + ')' : 'нічого не зроблено';
+    if (day.plan) text += ', план ' + T.formatDuration(day.plan);
+    return text;
+  }
+
+  // Деталі дня під графіком: спершу число, потім назва
+  function weekDetailHTML(key) {
+    const { schedules, tasks, timer } = state.data;
+    const day = C.daySummary(schedules, tasks, key, timer, Date.now());
+    const items = day.rows.filter((row) => row.fact > 0).map((row) => {
+      const cat = category(row.categoryId);
+      return `<span class="wk-item"><i class="key" style="--cat:${esc(cat.color)}"></i><b>${T.formatDuration(row.fact)}</b> ${esc(cat.name)}</span>`;
+    }).join('');
+    const summary = (day.fact ? 'зроблено ' + T.formatDuration(day.fact) : 'нічого не зроблено')
+      + (day.plan ? ', план ' + T.formatDuration(day.plan) : '');
+    return `
+      <span class="wk-detail-head"><b>${esc(capitalize(T.formatDate(key)))}</b> — ${esc(summary)}</span>
+      ${items ? `<span class="wk-items">${items}</span>` : ''}
+      <button type="button" class="link inline" data-action="summary-open-day" data-id="${key}">Підсумок цього дня →</button>`;
+  }
+
+  function showWeekDetail(key) {
+    const box = document.getElementById('wk-detail');
+    if (box) box.innerHTML = key ? weekDetailHTML(key) : WEEK_HINT;
+  }
+
+  // Ті самі числа, що й на графіку, — таблицею (для тих, кому зручніше читати цифри)
+  function renderWeekTable(week) {
+    const rows = week.days.map((day) => `
+      <tr>
+        <th scope="row">${esc(T.formatDateShort(day.key))}</th>
+        <td>${day.fact ? T.formatDuration(day.fact) : '—'}</td>
+        <td>${day.plan ? T.formatDuration(day.plan) : '—'}</td>
+        <td>${day.fact && day.lost !== null ? T.formatDuration(day.lost) : '—'}</td>
+      </tr>`).join('');
+    return `
+      <details class="card table-card" ${state.weekTableOpen ? 'open' : ''}>
+        <summary>Таблиця по днях</summary>
+        <table class="wk-table">
+          <thead><tr><th scope="col">День</th><th scope="col">Зроблено</th><th scope="col">План</th><th scope="col">Загублено</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+        <p class="hint">Прочерк — даних немає.</p>
+      </details>`;
+  }
+
   /* ---------- Вкладка «Налаштування» ---------- */
 
   function renderSettings() {
@@ -1264,6 +1535,43 @@
         }
         break;
       }
+      case 'summary-mode':
+        state.summaryMode = id;
+        render();
+        break;
+      case 'summary-open-day':
+        state.day = id;
+        state.summaryMode = 'day';
+        render();
+        window.scrollTo(0, 0);
+        break;
+      case 'week-prev':
+        state.weekEnd = T.addDays(state.weekEnd, -7);
+        state.weekPick = null;
+        render();
+        break;
+      case 'week-next': {
+        const next = T.addDays(state.weekEnd, 7);
+        state.weekEnd = next > todayKey() ? todayKey() : next;
+        state.weekPick = null;
+        render();
+        break;
+      }
+      case 'week-current':
+        state.weekEnd = todayKey();
+        state.weekPick = null;
+        render();
+        break;
+      case 'week-pick':
+        // Натискання «закріплює» день під графіком; повторне — знімає вибір
+        state.weekPick = state.weekPick === id ? null : id;
+        app.querySelectorAll('.wk-col').forEach((col) => {
+          const on = col.dataset.id === state.weekPick;
+          col.classList.toggle('picked', on);
+          col.setAttribute('aria-pressed', String(on));
+        });
+        showWeekDetail(state.weekPick || id);
+        break;
       case 'cat-add':
         openCategoryForm(null);
         break;
@@ -1296,6 +1604,27 @@
   app.addEventListener('keydown', (event) => {
     if (event.target.id === 'timer-title' && event.key === 'Enter') event.target.blur();
   });
+
+  // Графік тижня: наведення мишею чи фокус клавіатурою показує деталі дня
+  app.addEventListener('mouseover', (event) => {
+    const col = event.target.closest('.wk-col');
+    if (col) showWeekDetail(col.dataset.id);
+  });
+
+  app.addEventListener('mouseout', (event) => {
+    const cols = event.target.closest('.wk-cols');
+    if (cols && !cols.contains(event.relatedTarget)) showWeekDetail(state.weekPick);
+  });
+
+  app.addEventListener('focusin', (event) => {
+    const col = event.target.closest('.wk-col');
+    if (col) showWeekDetail(col.dataset.id);
+  });
+
+  // Пам'ятаємо, чи розгорнута таблиця, щоб щохвилинне оновлення її не згортало
+  app.addEventListener('toggle', (event) => {
+    if (event.target.classList.contains('table-card')) state.weekTableOpen = event.target.open;
+  }, true);
 
   app.addEventListener('submit', (event) => {
     if (event.target.id === 'schedule-form') {
@@ -1350,12 +1679,13 @@
     const minute = Math.floor(now / T.MINUTE);
     if (key !== state.today) {
       if (state.day === state.today) state.day = key;
+      if (state.weekEnd === state.today) state.weekEnd = key;
       state.today = key;
       state.minute = minute;
       render();
     } else if (minute !== state.minute) {
       state.minute = minute;
-      if (state.tab === 'today' && !isTyping()) render();
+      if (state.tab !== 'settings' && !isTyping()) render();
       else updateLive();
     } else {
       updateLive();
@@ -1406,6 +1736,7 @@
     if (result.status === 'unavailable') state.saveError = result.error;
     state.today = todayKey();
     state.day = state.today;
+    state.weekEnd = state.today;
     state.minute = Math.floor(Date.now() / T.MINUTE);
     render();
     if (result.problems.length) {

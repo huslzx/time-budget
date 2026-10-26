@@ -151,6 +151,24 @@
     return WEEKDAYS_SHORT[weekday(key)] + ' ' + d + '.' + pad2(m);
   }
 
+  // Проміжок днів: '20–26 жовтня', '28 вересня – 4 жовтня', '29 грудня 2026 – 4 січня 2027'
+  function formatDayRange(fromKey, toKey, todayKey) {
+    const a = splitKey(fromKey);
+    const b = splitKey(toKey);
+    if (a.y !== b.y) return a.d + ' ' + MONTHS[a.m - 1] + ' ' + a.y + ' – ' + b.d + ' ' + MONTHS[b.m - 1] + ' ' + b.y;
+    if (a.m === b.m) return a.d + '–' + formatDayMonth(toKey, todayKey);
+    return a.d + ' ' + MONTHS[a.m - 1] + ' – ' + formatDayMonth(toKey, todayKey);
+  }
+
+  // Українська множина: plural(1, 'день', 'дні', 'днів') → 'день', 2 → 'дні', 5 → 'днів'
+  function plural(n, one, few, many) {
+    const last = n % 10;
+    const lastTwo = n % 100;
+    if (last === 1 && lastTwo !== 11) return one;
+    if (last >= 2 && last <= 4 && (lastTwo < 12 || lastTwo > 14)) return few;
+    return many;
+  }
+
   // 'Сьогодні', 'Завтра', 'Вчора' або '' для інших днів
   function relativeDay(key, todayKey) {
     const diff = daysBetween(todayKey, key);
@@ -164,6 +182,6 @@
     MINUTE, HOUR, WEEKDAYS, WEEKDAYS_SHORT, MONTHS,
     pad2, dayKeyOf, isDayKey, addDays, daysBetween, atMinutes, dayStart, dayEnd,
     parseHM, formatHM, minutesOfDay, timeOf, durationParts, formatDuration, formatClock,
-    parseDuration, weekday, formatDate, formatDayMonth, formatDateShort, relativeDay,
+    parseDuration, weekday, formatDate, formatDayMonth, formatDateShort, formatDayRange, plural, relativeDay,
   };
 })();

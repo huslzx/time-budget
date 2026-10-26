@@ -389,6 +389,91 @@
     };
   }
 
+  /* ---------- Підсумки ---------- */
+
+  // Відсоток part від whole, округлений до цілого
+  function percentOf(part, whole) {
+    return whole > 0 ? Math.round((part / whole) * 100) : 0;
+  }
+
+  // Підсумок дня key за категоріями: скільки зроблено (fact) і заплановано (plan).
+  // Справи через північ діляться між днями, запущений таймер рахується як зроблене.
+  // split — чи є в цьому дні справа, частина якої належить сусідньому дню.
+  function daySummary(schedules, tasks, key, timer, now) {
+    const byCategory = new Map();
+    const add = (categoryId, field, ms) => {
+      if (ms <= 0) return;
+      if (!byCategory.has(categoryId)) byCategory.set(categoryId, { categoryId, fact: 0, plan: 0 });
+      byCategory.get(categoryId)[field] += ms;
+    };
+    let split = false;
+    const checkSplit = (slot) => {
+      const part = slotOnDay(slot, key);
+      if (isTimed(slot) && part > 0 && part < slotLength(slot)) split = true;
+    };
+    for (const task of tasks) {
+      add(task.categoryId, 'plan', slotOnDay(task.plan, key));
+      add(task.categoryId, 'fact', slotOnDay(task.fact, key));
+      checkSplit(currentSlot(task));
+    }
+    if (timer) {
+      const running = timerSlot(timer, now);
+      add(timer.categoryId, 'fact', slotOnDay(running, key));
+      checkSplit(running);
+    }
+    const rows = [...byCategory.values()].sort((a, b) => b.fact - a.fact || b.plan - a.plan);
+    const lost = lostTime(schedules, tasks, key, timer, now);
+    return {
+      key,
+      phase: dayPhase(schedules, key, now),
+      budget: dayBudget(schedules, key),
+      rows,
+      fact: rows.reduce((sum, row) => sum + row.fact, 0),
+      plan: rows.reduce((sum, row) => sum + row.plan, 0),
+      lost: lost ? lost.lost : null,
+      split,
+    };
+  }
+
+  // Підсумок 7 днів, що закінчуються днем endKey.
+  // Середнє рахується лише за дні, коли щось зроблено (recordedDays):
+  // дні без записів — це, найчастіше, дні, коли програмою ще не користувались.
+  function weekSummary(schedules, tasks, endKey, timer, now) {
+    const days = [];
+    for (let i = 6; i >= 0; i--) days.push(daySummary(schedules, tasks, T.addDays(endKey, -i), timer, now));
+    const recorded = days.filter((day) => day.fact > 0);
+    const n = recorded.length;
+    const byCategory = new Map();
+    for (const day of days) {
+      for (const row of day.rows) {
+        if (!byCategory.has(row.categoryId)) byCategory.set(row.categoryId, { categoryId: row.categoryId, fact: 0, plan: 0 });
+        byCategory.get(row.categoryId).fact += row.fact;
+        byCategory.get(row.categoryId).plan += row.plan;
+      }
+    }
+    const rows = [...byCategory.values()]
+      .map((row) => ({ ...row, average: n ? row.fact / n : 0 }))
+      .sort((a, b) => b.fact - a.fact || b.plan - a.plan);
+    const fact = rows.reduce((sum, row) => sum + row.fact, 0);
+    const withLost = recorded.filter((day) => day.lost !== null);
+    return {
+      days,
+      rows,
+      recordedDays: n,
+      fact,
+      plan: rows.reduce((sum, row) => sum + row.plan, 0),
+      averageFact: n ? fact / n : 0,
+      averageLost: withLost.length ? withLost.reduce((sum, day) => sum + day.lost, 0) / withLost.length : null,
+    };
+  }
+
+  // «Гарна» шкала для графіка: верхня межа й крок поділок (2, 4 або 8 годин)
+  function chartScale(maxMs) {
+    const hours = Math.max(maxMs / T.HOUR, 1);
+    const step = hours <= 8 ? 2 : hours <= 24 ? 4 : 8;
+    return { top: Math.ceil(hours / step) * step * T.HOUR, step: step * T.HOUR };
+  }
+
   // Через скільки годин підписувати шкалу, щоб підписи не налазили один на одного
   // (на один підпис «07:00» з відступом треба приблизно 56 пікселів)
   function pickTickStep(hours, widthPx) {
@@ -404,5 +489,6 @@
     usedOnDay, freeBudget, timeLeft, plannedLeft, overplan, unionLength, lostTime, overlaps,
     slotConflicts, timerResult, suggestTimerEnd, timerEndError,
     timelineItems, timelineRange, pickTickStep,
+    percentOf, daySummary, weekSummary, chartScale,
   };
 })();
