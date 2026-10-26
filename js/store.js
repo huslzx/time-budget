@@ -216,7 +216,7 @@
   }
 
   TB.store = {
-    STORAGE_KEY, VERSION, PALETTE, DEFAULT_CATEGORIES, MAX_TITLE, MAX_CATEGORY_NAME,
+    STORAGE_KEY, VERSION, PALETTE, DEFAULT_CATEGORIES, MAX_TITLE, MAX_CATEGORY_NAME, MAX_SLOT,
     defaultData, newId, normalize, load, save, describeError,
   };
 })();

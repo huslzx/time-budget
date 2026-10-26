@@ -3,8 +3,8 @@
  *
  * Цей файл малює екрани й відповідає на натискання кнопок.
  * Розрахунки беруться з calc.js, збереження — зі store.js.
- * Після кожної зміни даних екран малюється заново, а «живі» числа
- * (до відбою, загублений час, годинник) оновлюються щосекунди окремо.
+ * Після кожної зміни даних екран малюється заново, а «живі» частини
+ * (числа, секундомір таймера, позначка «зараз» на шкалі) оновлюються щосекунди окремо.
  */
 (function () {
   'use strict';
@@ -14,20 +14,27 @@
   const dialog = document.getElementById('dialog');
   const toasts = document.getElementById('toasts');
 
+  // Якщо сторінка була прихована довше за це, а таймер ішов, — питаємо, чи його не забули
+  const AWAY_LIMIT = 30 * T.MINUTE;
+
   const state = {
     data: null, // усі дані програми (див. store.js)
     tab: 'today', // відкрита вкладка
     day: '', // день, який показує вкладка «Сьогодні»
     today: '', // сьогоднішня дата — щоб помітити північ
-    minute: -1, // поточна хвилина — щоб раз на хвилину оновлювати список
+    minute: -1, // поточна хвилина — щоб раз на хвилину оновлювати екран
     saveError: null, // текст помилки, якщо дані не вдається зберегти
-    form: null, // відкрита форма справи: { taskId, markDone }
+    form: null, // відкрита форма: { taskId, markDone, ackOverlap } або { categoryId }
+    timeline: null, // межі намальованої шкали дня: { key, from, to }
+    hiddenAt: null, // коли сторінку сховали (перейшли на іншу вкладку чи програму)
   };
 
   const TABS = [
     { id: 'today', label: 'Сьогодні', icon: 'sun' },
     { id: 'settings', label: 'Налаштування', icon: 'sliders' },
   ];
+
+  const KIND_LABEL = { done: 'виконано', planned: 'заплановано', running: 'іде зараз' };
 
   // Значки з набору Lucide (lucide.dev, ліцензія ISC)
   const ICONS = {
@@ -42,12 +49,15 @@
     trash: '<path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>',
     alert: '<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/>',
     x: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
+    play: '<polygon points="6 3 20 12 6 21 6 3"/>',
+    stop: '<rect x="6" y="6" width="12" height="12" rx="2"/>',
+    clock: '<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>',
   };
 
   /* ---------- Дрібні помічники ---------- */
 
   function icon(name) {
-    return '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true">' + ICONS[name] + '</svg>';
+    return '<svg class="icon icon-' + name + '" viewBox="0 0 24 24" aria-hidden="true">' + ICONS[name] + '</svg>';
   }
 
   // Захист від того, щоб назва справи на кшталт «<b>» не стала частиною сторінки
@@ -77,10 +87,40 @@
     return task.title || category(task.categoryId).name;
   }
 
+  // Що записує таймер: введена назва, назва справи або категорія
+  function timerName(timer) {
+    if (timer.title.trim()) return timer.title.trim();
+    const linked = C.timerTask(state.data.tasks, timer);
+    return linked ? taskName(linked) : category(timer.categoryId).name;
+  }
+
+  // Назва учасника накладання: справа або таймер
+  function itemName(id) {
+    if (id === 'timer') return state.data.timer ? 'таймер «' + timerName(state.data.timer) + '»' : 'таймер';
+    const task = state.data.tasks.find((t) => t.id === id);
+    return '«' + (task ? taskName(task) : 'справа') + '»';
+  }
+
+  // ««Навчання» (10:00–12:00), таймер «Спорт» (11:00–11:30)»
+  function conflictText(conflicts) {
+    return conflicts.map((c) => itemName(c.id) + ' (' + T.timeOf(c.start) + '–' + T.timeOf(c.end) + ')').join(', ');
+  }
+
   // Назва дня для повідомлень: «сьогодні», «завтра» або «пт 30.10»
   function dayLabel(key) {
     const rel = T.relativeDay(key, todayKey());
     return rel ? rel.toLowerCase() : T.formatDateShort(key);
+  }
+
+  // «сьогодні о 10:05», «вчора о 21:00»
+  function whenText(ms) {
+    return dayLabel(T.dayKeyOf(ms)) + ' о ' + T.timeOf(ms);
+  }
+
+  // Користувач саме щось вводить — тоді не перемальовуємо екран, щоб не збити введення
+  function isTyping() {
+    const el = document.activeElement;
+    return !!el && app.contains(el) && el.tagName === 'INPUT';
   }
 
   // Тривалість для великих чисел: цифри великі, «год» і «хв» — дрібніші
@@ -200,12 +240,15 @@
       </section>
       ${key !== tKey ? '<p class="center"><button type="button" class="link" data-action="day-today">Повернутися до сьогодні</button></p>' : ''}
       <p class="schedule-line">Підйом ${item.wake} · Відбій ${item.sleep} · Бюджет дня ${T.formatDuration(budget)}</p>
+      ${renderTimerCard()}
       <section class="stats">
         ${statCard('free', 'Вільний бюджет')}
         ${statCard('sleep', 'До відбою')}
         ${statCard('lost', 'Загублений час')}
       </section>
-      <div id="overplan"></div>
+      <div id="alerts"></div>
+      ${renderTimeline(key)}
+      ${key === tKey ? renderQuickStart() : ''}
       ${renderTaskSection(key)}`;
   }
 
@@ -218,7 +261,7 @@
       </div>`;
   }
 
-  // Оновлює числа, які залежать від поточного часу. Викликається щосекунди.
+  // Оновлює все, що залежить від поточного часу. Викликається щосекунди.
   function updateLive() {
     const now = Date.now();
     const clock = document.getElementById('clock');
@@ -276,12 +319,12 @@
       });
     }
 
-    // Попередження «Не встигнеш»
-    const op = C.overplan(schedules, tasks, key, timer, now);
-    setHTML(document.getElementById('overplan'), op ? `
-      <div class="alert warn">${icon('alert')}
-        <div><b>Не встигнеш:</b> плану на ${T.formatDuration(op.planned)}, а часу лишилось ${T.formatDuration(op.left, 'floor')}.</div>
-      </div>` : '');
+    // Секундомір таймера
+    const timerClock = document.getElementById('timer-clock');
+    if (timerClock && timer) timerClock.textContent = T.formatClock(now - timer.start);
+
+    updateTimeline(key, now);
+    setHTML(document.getElementById('alerts'), renderAlerts(key, now));
   }
 
   function setStat(id, { value, hint, tone = '' }) {
@@ -299,39 +342,351 @@
     }
   }
 
+  // Попередження: «Не встигнеш» і справи, що накладаються
+  function renderAlerts(key, now) {
+    const { schedules, tasks, timer } = state.data;
+    let html = '';
+    const op = C.overplan(schedules, tasks, key, timer, now);
+    if (op) {
+      html += `
+        <div class="alert warn">${icon('alert')}
+          <div><b>Не встигнеш:</b> плану на ${T.formatDuration(op.planned)}, а часу лишилось ${T.formatDuration(op.left, 'floor')}.</div>
+        </div>`;
+    }
+    const pairs = C.overlaps(tasks, key, timer, now);
+    if (pairs.length) {
+      const rows = pairs.slice(0, 5).map((pair) => {
+        const fix = fixTarget(pair);
+        return `<li>${esc(itemName(pair.a))} і ${esc(itemName(pair.b))}: ${T.timeOf(pair.start)}–${T.timeOf(pair.end)}
+          ${fix ? `<button type="button" class="link inline" data-action="task-edit" data-id="${esc(fix)}">Виправити</button>` : ''}</li>`;
+      }).join('');
+      html += `
+        <div class="alert warn">${icon('alert')}
+          <div><b>Справи накладаються за часом.</b> Перевір, чи правильно вказано час.
+            <ul class="alert-list">${rows}</ul>
+          </div>
+        </div>`;
+    }
+    return html;
+  }
+
+  // Яку справу з пари запропонувати виправити: пізнішу, і не ту, що зараз іде за таймером
+  function fixTarget(pair) {
+    const linked = C.timerTask(state.data.tasks, state.data.timer);
+    const candidates = [pair.a, pair.b]
+      .map((id) => state.data.tasks.find((t) => t.id === id))
+      .filter((task) => task && task !== linked)
+      .sort((x, y) => C.currentSlot(y).start - C.currentSlot(x).start);
+    return candidates.length ? candidates[0].id : null;
+  }
+
+  /* ---------- Таймер ---------- */
+
+  function renderTimerCard() {
+    const timer = state.data.timer;
+    if (!timer) return '';
+    const cat = category(timer.categoryId);
+    const linked = C.timerTask(state.data.tasks, timer);
+    const plan = linked && linked.plan ? ' · план ' + T.formatDuration(C.slotLength(linked.plan)) : '';
+    return `
+      <section class="timer-card" style="--cat:${esc(cat.color)}" aria-label="Таймер">
+        <div class="timer-top">
+          <span class="timer-cat"><i class="dot"></i>${esc(cat.name)}</span>
+          <span>почато ${esc(whenText(timer.start))}${esc(plan)}</span>
+        </div>
+        <div class="timer-row">
+          <div class="timer-clock" id="timer-clock">${T.formatClock(Date.now() - timer.start)}</div>
+          <button type="button" class="btn primary" data-action="timer-stop">${icon('stop')}Зупинити</button>
+        </div>
+        <input type="text" id="timer-title" maxlength="${S.MAX_TITLE}" autocomplete="off"
+          placeholder="Що саме робиш? (необов’язково)" aria-label="Що саме робиш" value="${esc(timer.title)}">
+      </section>`;
+  }
+
+  function renderQuickStart() {
+    const timer = state.data.timer;
+    const chips = activeCategories().map((c) => {
+      const running = timer && !timer.taskId && timer.categoryId === c.id;
+      return `
+        <button type="button" class="start-chip" style="--cat:${esc(c.color)}" data-action="timer-start" data-id="${esc(c.id)}"
+          aria-pressed="${running ? 'true' : 'false'}" aria-label="Почати таймер: ${esc(c.name)}">
+          ${icon('play')}${esc(c.name)}
+        </button>`;
+    }).join('');
+    return `
+      <section class="quick">
+        <div class="section-head"><h2>Почати зараз</h2></div>
+        <div class="start-list">${chips}</div>
+        <p class="hint">Натисни категорію — піде таймер. «Зупинити» збереже справу з реальним часом.</p>
+      </section>`;
+  }
+
+  // Запуск таймера: для категорії (categoryId) або для запланованої справи (taskId)
+  async function startTimer({ categoryId = null, taskId = null }) {
+    const task = taskId ? state.data.tasks.find((t) => t.id === taskId && !t.fact) : null;
+    if (taskId && !task) return;
+    const catId = task ? task.categoryId : categoryId;
+    const name = task ? taskName(task) : category(catId).name;
+    const current = state.data.timer;
+    if (current) {
+      const same = task ? current.taskId === task.id : !current.taskId && current.categoryId === catId;
+      if (same) {
+        toast('Цей таймер уже йде.');
+        return;
+      }
+      const ok = await confirmBox({
+        title: 'Перемкнути таймер?',
+        text: 'Зараз іде «' + timerName(current) + '» (' + T.formatDuration(Date.now() - current.start, 'floor')
+          + '). Зупинити його, записати справу й почати «' + name + '»?',
+        ok: 'Зупинити й почати',
+      });
+      if (!ok || !state.data.timer) return;
+      const error = finishTimer(Date.now(), { quiet: true });
+      if (error) {
+        toast(error, 'error');
+        return;
+      }
+    }
+    commit((data) => {
+      data.timer = { categoryId: catId, title: task ? task.title : '', start: Date.now(), taskId: task ? task.id : null };
+    });
+    toast('Таймер запущено: ' + name);
+  }
+
+  // Зупиняє таймер у момент end і записує справу. Повертає текст помилки або null
+  function finishTimer(end, { quiet = false } = {}) {
+    const timer = state.data.timer;
+    if (!timer) return null;
+    const error = C.timerEndError(timer, end, Date.now(), S.MAX_SLOT);
+    if (error) return error;
+    const result = C.timerResult(state.data.tasks, timer, end);
+    let saved = null;
+    commit((data) => {
+      data.timer = null;
+      if (!result) return;
+      let task = result.taskId && data.tasks.find((t) => t.id === result.taskId);
+      if (!task) {
+        task = { id: S.newId(), categoryId: timer.categoryId, title: '', plan: null, fact: null, created: Date.now() };
+        data.tasks.push(task);
+      }
+      const title = timer.title.trim().replace(/\s+/g, ' ').slice(0, S.MAX_TITLE);
+      if (title) task.title = title;
+      task.fact = result.slot;
+      saved = task;
+    });
+    if (quiet) return null;
+    if (!saved) {
+      toast('Таймер ішов менше хвилини — справу не збережено.');
+      return null;
+    }
+    const day = T.dayKeyOf(saved.fact.start);
+    const where = day === todayKey() ? '' : ' (' + dayLabel(day) + ')';
+    const conflicts = C.slotConflicts(state.data.tasks, saved.fact, saved.id, null, Date.now());
+    if (conflicts.length) {
+      toast('Збережено' + where + ', але справа накладається на ' + conflictText(conflicts) + '.', 'error');
+    } else {
+      toast('Збережено' + where + ': «' + taskName(saved) + '», ' + T.formatDuration(C.slotLength(saved.fact)));
+    }
+    return null;
+  }
+
+  function toLocalInput(ms) {
+    return T.dayKeyOf(ms) + 'T' + T.timeOf(ms);
+  }
+
+  function fromLocalInput(value) {
+    const match = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})/.exec(value || '');
+    return match ? T.atMinutes(match[1], T.parseHM(match[2])) : NaN;
+  }
+
+  // «Таймер ще йде»: питаємо при відкритті сторінки і коли повертаєшся до неї після перерви
+  function openForgottenTimer() {
+    const timer = state.data && state.data.timer;
+    if (!timer || dialog.open) return;
+    const now = Date.now();
+    const suggested = C.suggestTimerEnd(state.data.schedules, timer, now);
+    openDialog(`
+      <form class="sheet" id="forgotten-form" novalidate>
+        <h2>Таймер ще йде</h2>
+        <p>«${esc(timerName(timer))}» запущено ${esc(whenText(timer.start))}, минуло ${esc(T.formatDuration(now - timer.start, 'floor'))}. Ти не забув його вимкнути?</p>
+        <div class="choice">
+          <button type="button" class="btn" data-action="forgotten-keep">Продовжити</button>
+          <button type="button" class="btn" data-action="forgotten-now">Зупинити зараз</button>
+        </div>
+        <label class="field">
+          <span>Або вкажи, коли ти закінчив</span>
+          <input type="datetime-local" name="end" value="${toLocalInput(suggested)}" min="${toLocalInput(timer.start)}" max="${toLocalInput(now)}">
+        </label>
+        <p class="form-error" id="forgotten-error" role="alert"></p>
+        <footer class="sheet-foot">
+          <button type="submit" class="btn primary">Зупинити о цьому часі</button>
+        </footer>
+      </form>`);
+  }
+
+  function stopForgotten(end) {
+    const error = finishTimer(end);
+    if (error) {
+      document.getElementById('forgotten-error').textContent = error;
+      return;
+    }
+    closeDialog();
+  }
+
+  /* ---------- Шкала дня ---------- */
+
+  function timelinePct(ms) {
+    const { from, to } = state.timeline;
+    return +Math.min(100, Math.max(0, ((ms - from) / (to - from)) * 100)).toFixed(3);
+  }
+
+  // Частина дня, де порожні місця — загублений час: від підйому до «зараз» (або до відбою)
+  function pastSpan(key, now) {
+    const phase = C.dayPhase(state.data.schedules, key, now);
+    if (phase === 'future' || phase === 'before') return null;
+    const w = C.dayWindow(state.data.schedules, key);
+    return [w.wake, Math.min(now, w.sleep)];
+  }
+
+  function renderTimeline(key) {
+    const now = Date.now();
+    const { schedules, tasks, timer } = state.data;
+    const range = C.timelineRange(schedules, tasks, key, timer, now);
+    const items = C.timelineItems(tasks, key, timer, now);
+    state.timeline = { key, from: range.from, to: range.to };
+    const w = C.dayWindow(schedules, key);
+    const isToday = key === todayKey();
+    const lanes = items.reduce((max, item) => Math.max(max, item.lane + 1), 1);
+    const width = Math.min(app.clientWidth || 360, 760) - 64;
+    const step = C.pickTickStep((range.to - range.from) / T.HOUR, width);
+    const ticks = [];
+    for (let t = range.from; t <= range.to; t += step * T.HOUR) ticks.push(t);
+    const axis = ticks.map((t) => {
+      const edge = t === range.from ? 'first' : t === range.to ? 'last' : '';
+      return `<span class="${edge}" style="left:${timelinePct(t)}%">${T.timeOf(t)}</span>`;
+    }).join('');
+    const marks = [[w.wake, 'Підйом'], [w.sleep, 'Відбій']]
+      .filter(([ms]) => ms > range.from && ms < range.to)
+      .map(([ms, label]) => `<div class="tl-mark" style="left:${timelinePct(ms)}%" title="${label} о ${T.timeOf(ms)}"></div>`)
+      .join('');
+    const untimed = C.tasksForDay(tasks, key).filter((task) => !C.isTimed(C.currentSlot(task)));
+    const past = pastSpan(key, now);
+    return `
+      <section class="timeline" aria-label="Шкала дня">
+        <h2>Шкала дня</h2>
+        <div class="tl-wrap">
+          <div class="tl-track" style="--lanes:${lanes}">
+            <div class="tl-past" id="tl-past" ${past ? '' : 'hidden'}></div>
+            ${marks}
+            ${items.map(renderBlock).join('')}
+          </div>
+          ${isToday ? '<div class="tl-now" id="tl-now" hidden><span>зараз</span></div>' : ''}
+        </div>
+        <div class="tl-axis" aria-hidden="true">${axis}</div>
+        ${untimed.length ? `<div class="tl-untimed"><span class="hint">Без часу:</span>${untimed.map(renderUntimedChip).join('')}</div>` : ''}
+        <div class="tl-legend">
+          <span><i class="lg done"></i>виконано</span>
+          <span><i class="lg planned"></i>заплановано</span>
+          ${past ? '<span><i class="lg past"></i>минуло від підйому; порожні місця — загублений час</span>' : ''}
+          ${isToday ? '<span><i class="lg now"></i>зараз</span>' : ''}
+        </div>
+      </section>`;
+  }
+
+  function renderBlock(item) {
+    const cat = category(item.categoryId);
+    const task = state.data.tasks.find((t) => t.id === item.id);
+    const name = item.kind === 'running' ? timerName(state.data.timer) : task ? taskName(task) : cat.name;
+    const until = item.kind === 'running' ? 'зараз' : T.timeOf(item.end);
+    const label = name + ', ' + T.timeOf(item.start) + '–' + until + ', ' + KIND_LABEL[item.kind];
+    const classes = 'tl-block ' + item.kind + (item.cutStart ? ' cut-start' : '') + (item.cutEnd ? ' cut-end' : '');
+    const left = timelinePct(item.start);
+    const width = +(timelinePct(item.end) - left).toFixed(3);
+    return `
+      <button type="button" class="${classes}" data-action="${item.kind === 'running' ? 'timer-focus' : 'task-edit'}"
+        data-id="${esc(item.id)}" data-start="${item.start}" title="${esc(label)}" aria-label="${esc(label)}"
+        style="--cat:${esc(cat.color)};--lane:${item.lane};left:${left}%;width:${width}%"></button>`;
+  }
+
+  function renderUntimedChip(task) {
+    const cat = category(task.categoryId);
+    const length = T.formatDuration(C.slotLength(C.currentSlot(task)));
+    return `
+      <button type="button" class="tl-chip ${task.fact ? 'done' : 'planned'}" style="--cat:${esc(cat.color)}"
+        data-action="task-edit" data-id="${esc(task.id)}"><i class="dot"></i>${esc(taskName(task))} · ${length}</button>`;
+  }
+
+  // «Живі» частини шкали: позначка «зараз», минулий час і блок таймера, що росте
+  function updateTimeline(key, now) {
+    if (!state.timeline || state.timeline.key !== key) return;
+    const nowEl = document.getElementById('tl-now');
+    if (nowEl) {
+      nowEl.hidden = now < state.timeline.from || now > state.timeline.to;
+      nowEl.style.left = timelinePct(now) + '%';
+    }
+    const pastEl = document.getElementById('tl-past');
+    const span = pastSpan(key, now);
+    if (pastEl && span) {
+      pastEl.hidden = false;
+      pastEl.style.left = timelinePct(span[0]) + '%';
+      pastEl.style.width = Math.max(0, timelinePct(span[1]) - timelinePct(span[0])) + '%';
+    }
+    const running = app.querySelector('.tl-block.running');
+    if (running) {
+      running.style.width = Math.max(0, timelinePct(now) - timelinePct(Number(running.dataset.start))) + '%';
+    }
+  }
+
+  /* ---------- Список справ ---------- */
+
   function renderTaskSection(key) {
     const now = Date.now();
-    const list = C.tasksForDay(state.data.tasks, key);
+    const { tasks, timer } = state.data;
+    const list = C.tasksForDay(tasks, key);
+    const clashes = {};
+    for (const pair of C.overlaps(tasks, key, timer, now)) {
+      (clashes[pair.a] = clashes[pair.a] || []).push(pair.b);
+      (clashes[pair.b] = clashes[pair.b] || []).push(pair.a);
+    }
     const addButton = `<button type="button" class="btn primary" data-action="task-add">${icon('plus')}Додати справу</button>`;
     return `
       <div class="section-head"><h2>Справи</h2>${list.length ? addButton : ''}</div>
-      ${list.length ? '<ul class="tasks">' + list.map((task) => renderTask(task, key, now)).join('') + '</ul>' : renderEmpty(key, addButton)}`;
+      ${list.length
+        ? '<ul class="tasks">' + list.map((task) => renderTask(task, key, now, clashes[task.id] || [])).join('') + '</ul>'
+        : renderEmpty(key, addButton)}`;
   }
 
-  function renderTask(task, key, now) {
+  function renderTask(task, key, now, clashIds) {
     const cat = category(task.categoryId);
     const done = !!task.fact;
     const slot = C.currentSlot(task);
     const name = taskName(task);
+    const running = C.timerTask(state.data.tasks, state.data.timer) === task;
     const meta = [];
     if (task.title) meta.push(esc(cat.name));
     meta.push(esc(slotText(slot, key)));
     if (done && task.plan) meta.push('план: ' + esc(T.formatDuration(C.slotLength(task.plan))));
-    const late = !done && C.isTimed(slot) && slot.end <= now;
+    const late = !done && !running && C.isTimed(slot) && slot.end <= now;
+    const canStart = !done && !running && key === todayKey();
     const id = esc(task.id);
+    let badge = '<span class="badge">Заплановано</span>';
+    if (done) badge = `<span class="badge done">${icon('check')}Виконано</span>`;
+    if (running) badge = `<span class="badge running">${icon('clock')}Іде зараз</span>`;
     return `
       <li class="task ${done ? 'is-done' : 'is-planned'}" style="--cat:${esc(cat.color)}">
         <div class="task-main">
           <div class="task-name">${esc(name)}</div>
           <div class="task-meta">${meta.join(' · ')}</div>
           ${late ? '<div class="task-late">Час минув — познач, як було насправді</div>' : ''}
+          ${clashIds.length ? '<div class="task-warn">Накладається на ' + esc(clashIds.map(itemName).join(', ')) + '</div>' : ''}
         </div>
         <div class="task-side">
           <div class="task-dur">${T.formatDuration(C.slotOnDay(slot, key))}</div>
-          ${done ? `<span class="badge done">${icon('check')}Виконано</span>` : '<span class="badge">Заплановано</span>'}
+          ${badge}
         </div>
         <div class="task-actions">
-          ${done ? '' : `<button type="button" class="btn small" data-action="task-done" data-id="${id}">${icon('check')}Виконано</button>`}
+          ${canStart ? `<button type="button" class="btn small" data-action="task-start" data-id="${id}">${icon('play')}Почати</button>` : ''}
+          ${done || running ? '' : `<button type="button" class="btn small" data-action="task-done" data-id="${id}">${icon('check')}Виконано</button>`}
           <button type="button" class="icon-btn" data-action="task-edit" data-id="${id}" aria-label="Змінити «${esc(name)}»">${icon('edit')}</button>
           <button type="button" class="icon-btn" data-action="task-delete" data-id="${id}" aria-label="Видалити «${esc(name)}»">${icon('trash')}</button>
         </div>
@@ -344,7 +699,7 @@
       return `
         <div class="empty">
           <p class="empty-title">Почнімо!</p>
-          <p>Між підйомом і відбоєм у тебе ${budget}. Додай першу справу, наприклад «Навчання, 4 год», і побачиш, скільки часу лишиться.</p>
+          <p>Між підйомом і відбоєм у тебе ${budget}. Додай першу справу, наприклад «Навчання, 4 год», або натисни категорію в «Почати зараз» — піде таймер.</p>
           ${addButton}
         </div>`;
     }
@@ -437,12 +792,13 @@
           <label class="field"><span>Хвилини</span><input type="text" name="minutes" inputmode="numeric" autocomplete="off" placeholder="0"></label>
         </div>
         <p class="preview" id="task-preview"></p>
+        <p class="form-warn" id="task-warn" role="alert"></p>
         <p class="form-error" id="task-error" role="alert"></p>
         ${sheetFoot('Зберегти')}
       </form>`);
 
     const form = document.getElementById('task-form');
-    state.form = { taskId, markDone };
+    state.form = { taskId, markDone, ackOverlap: null };
     fillSlot(form, task ? (status === 'done' ? task.fact || task.plan : task.plan) : null,
       status === 'done' ? 'range' : 'duration');
     updateTaskForm(form);
@@ -525,6 +881,13 @@
     const result = readSlot(form);
     document.getElementById('task-preview').textContent = result.slot ? previewText(result.slot) : '';
     document.getElementById('task-error').textContent = '';
+    // Час змінили — попередження про накладання більше не стосується нового часу
+    const slotKey = result.slot ? JSON.stringify(result.slot) : null;
+    if (state.form && state.form.ackOverlap && state.form.ackOverlap !== slotKey) {
+      state.form.ackOverlap = null;
+      document.getElementById('task-warn').textContent = '';
+      form.querySelector('button[type="submit"]').textContent = 'Зберегти';
+    }
   }
 
   // Перемкнули статус у вже створеної справи — показуємо відповідний час (план або факт)
@@ -556,8 +919,19 @@
       errorBox.textContent = 'Ця справа ще не почалася. Познач її як заплановану.';
       return;
     }
-    const title = f.title.value.trim().replace(/\s+/g, ' ').slice(0, S.MAX_TITLE);
     const taskId = state.form.taskId;
+    // Накладання: попереджаємо один раз; повторне «Зберегти» з тим самим часом — зберігає
+    const conflicts = C.slotConflicts(state.data.tasks, slot, taskId, state.data.timer, Date.now());
+    const slotKey = JSON.stringify(slot);
+    if (conflicts.length && state.form.ackOverlap !== slotKey) {
+      state.form.ackOverlap = slotKey;
+      document.getElementById('task-warn').textContent = 'Накладається на ' + conflictText(conflicts)
+        + '. Зміни час або натисни «Зберегти все одно».';
+      form.querySelector('button[type="submit"]').textContent = 'Зберегти все одно';
+      return;
+    }
+    const title = f.title.value.trim().replace(/\s+/g, ' ').slice(0, S.MAX_TITLE);
+    let timerStopped = false;
     commit((data) => {
       let task = taskId && data.tasks.find((t) => t.id === taskId);
       if (!task) {
@@ -571,16 +945,22 @@
         task.fact = null;
       } else {
         task.fact = slot;
+        // Реальний час уже вписано вручну — таймер цієї справи більше не потрібен
+        if (data.timer && data.timer.taskId === task.id) {
+          data.timer = null;
+          timerStopped = true;
+        }
       }
     });
     closeDialog();
     const day = C.slotDay(slot);
+    const note = timerStopped ? ' Таймер цієї справи вимкнено.' : '';
     if (day !== state.day) {
       state.day = day;
       render();
-      toast('Збережено на ' + dayLabel(day));
+      toast('Збережено на ' + dayLabel(day) + '.' + note);
     } else {
-      toast('Збережено');
+      toast('Збережено.' + note);
     }
   }
 
@@ -865,6 +1245,25 @@
       case 'task-delete':
         deleteTask(id);
         break;
+      case 'task-start':
+        startTimer({ taskId: id });
+        break;
+      case 'timer-start':
+        startTimer({ categoryId: id });
+        break;
+      case 'timer-stop': {
+        const error = finishTimer(Date.now());
+        if (error) openForgottenTimer();
+        break;
+      }
+      case 'timer-focus': {
+        const input = document.getElementById('timer-title');
+        if (input) {
+          input.scrollIntoView({ block: 'center', behavior: 'smooth' });
+          input.focus({ preventScroll: true });
+        }
+        break;
+      }
       case 'cat-add':
         openCategoryForm(null);
         break;
@@ -881,11 +1280,21 @@
   });
 
   app.addEventListener('input', (event) => {
+    // Назву справи таймера зберігаємо одразу, але без перемальовування
+    if (event.target.id === 'timer-title' && state.data.timer) {
+      state.data.timer.title = event.target.value.slice(0, S.MAX_TITLE);
+      persist();
+      return;
+    }
     const form = event.target.form;
     if (form && form.id === 'schedule-form') {
       document.getElementById('schedule-preview').textContent = schedulePreview(form.elements.wake.value, form.elements.sleep.value);
       document.getElementById('schedule-error').textContent = '';
     }
+  });
+
+  app.addEventListener('keydown', (event) => {
+    if (event.target.id === 'timer-title' && event.key === 'Enter') event.target.blur();
   });
 
   app.addEventListener('submit', (event) => {
@@ -896,7 +1305,17 @@
   });
 
   dialog.addEventListener('click', (event) => {
-    if (event.target.closest('[data-action="dialog-close"]')) closeDialog();
+    const el = event.target.closest('[data-action]');
+    if (!el) return;
+    switch (el.dataset.action) {
+      case 'dialog-close':
+      case 'forgotten-keep':
+        closeDialog();
+        break;
+      case 'forgotten-now':
+        stopForgotten(Date.now());
+        break;
+    }
   });
 
   dialog.addEventListener('input', (event) => {
@@ -913,8 +1332,10 @@
 
   dialog.addEventListener('submit', (event) => {
     event.preventDefault();
-    if (event.target.id === 'task-form') submitTaskForm(event.target);
-    if (event.target.id === 'category-form') submitCategoryForm(event.target);
+    const form = event.target;
+    if (form.id === 'task-form') submitTaskForm(form);
+    if (form.id === 'category-form') submitCategoryForm(form);
+    if (form.id === 'forgotten-form') stopForgotten(fromLocalInput(form.elements.end.value));
   });
 
   dialog.addEventListener('close', () => {
@@ -922,7 +1343,7 @@
     dialog.innerHTML = '';
   });
 
-  // Щосекунди: оновити «живі» числа; щохвилини — увесь екран; опівночі — перейти на новий день
+  // Щосекунди: оновити «живі» частини; щохвилини — увесь екран; опівночі — перейти на новий день
   function tick() {
     const now = Date.now();
     const key = T.dayKeyOf(now);
@@ -934,7 +1355,7 @@
       render();
     } else if (minute !== state.minute) {
       state.minute = minute;
-      if (state.tab === 'today') render();
+      if (state.tab === 'today' && !isTyping()) render();
       else updateLive();
     } else {
       updateLive();
@@ -951,8 +1372,26 @@
     }
   });
 
+  // Повернулися до сторінки після перерви, а таймер весь цей час ішов, — питаємо, чи його не забули
   document.addEventListener('visibilitychange', () => {
-    if (!document.hidden && state.data) tick();
+    if (!state.data) return;
+    if (document.hidden) {
+      state.hiddenAt = Date.now();
+      return;
+    }
+    const away = state.hiddenAt ? Date.now() - state.hiddenAt : 0;
+    state.hiddenAt = null;
+    tick();
+    if (state.data.timer && away > AWAY_LIMIT) openForgottenTimer();
+  });
+
+  // Ширина екрана змінилась — перемальовуємо, щоб підписи на шкалі не налазили один на одного
+  let resizeTimer = null;
+  window.addEventListener('resize', () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      if (state.data && state.tab === 'today' && !isTyping()) render();
+    }, 200);
   });
 
   /* ---------- Запуск ---------- */
@@ -972,6 +1411,8 @@
     if (result.problems.length) {
       toast('Частину даних було пошкоджено й виправлено: ' + result.problems.join('; ') + '.', 'error');
     }
+    // Таймер іде ще з минулого разу — питаємо, чи його не забули вимкнути
+    openForgottenTimer();
     setInterval(tick, 1000);
   }
 

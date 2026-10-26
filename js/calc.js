@@ -271,9 +271,138 @@
     return result;
   }
 
+  // З якими справами (і таймером) перетнеться відрізок slot, якщо його зберегти.
+  // Справа exceptId — та, яку зараз редагують, — не враховується.
+  // Повертає [{ id, start, end }]: id справи або 'timer' і спільний проміжок.
+  function slotConflicts(tasks, slot, exceptId, timer, now) {
+    if (!isTimed(slot)) return [];
+    const linked = timerTask(tasks, timer);
+    const result = [];
+    const check = (id, other) => {
+      const start = Math.max(slot.start, other.start);
+      const end = Math.min(slot.end, other.end);
+      if (end > start) result.push({ id, start, end });
+    };
+    for (const task of tasks) {
+      if (task.id === exceptId) continue;
+      const other = linked && task.id === linked.id ? timerSlot(timer, now) : currentSlot(task);
+      if (isTimed(other)) check(task.id, other);
+    }
+    if (timer && !linked) check('timer', timerSlot(timer, now));
+    return result;
+  }
+
+  /* ---------- Таймер ---------- */
+
+  function roundToMinute(ms) {
+    return Math.round(ms / T.MINUTE) * T.MINUTE;
+  }
+
+  // Що записати, коли таймер зупиняють у момент end. Час округлюється до хвилин,
+  // щоб суми на екрані сходилися. Повертає { slot, taskId } — taskId є, якщо таймер
+  // ішов для запланованої справи; або null, якщо таймер ішов менше хвилини.
+  function timerResult(tasks, timer, end) {
+    const slot = { start: roundToMinute(timer.start), end: roundToMinute(end) };
+    if (slot.end - slot.start < T.MINUTE) return null;
+    const linked = timerTask(tasks, timer);
+    return { slot, taskId: linked ? linked.id : null };
+  }
+
+  // Якщо таймер забули вимкнути: найімовірніше, справа закінчилась у відбій
+  // того дня, коли таймер запустили (якщо відбій уже минув). Інакше — зараз.
+  function suggestTimerEnd(schedules, timer, now) {
+    const sleep = dayWindow(schedules, T.dayKeyOf(timer.start)).sleep;
+    return sleep > timer.start && sleep < now ? sleep : now;
+  }
+
+  // Перевірка часу зупинки таймера: текст помилки або null
+  function timerEndError(timer, end, now, maxLength) {
+    if (!Number.isFinite(end)) return 'Вкажи, коли ти закінчив.';
+    if (end <= timer.start) return 'Кінець має бути пізніше за початок (' + T.timeOf(timer.start) + ').';
+    if (end > now + T.MINUTE) return 'Цей час ще не настав.';
+    if (end - timer.start > maxLength) return 'Таймер не може записати справу довшу за 7 днів. Вкажи, коли ти насправді закінчив.';
+    return null;
+  }
+
+  /* ---------- Шкала дня ---------- */
+
+  function floorHour(ms) {
+    const date = new Date(ms);
+    date.setMinutes(0, 0, 0);
+    return date.getTime();
+  }
+
+  function ceilHour(ms) {
+    const floored = floorHour(ms);
+    return floored === ms ? ms : floored + T.HOUR;
+  }
+
+  // Блоки шкали дня key: справи з часом і запущений таймер, обрізані північчю.
+  // [{ id, categoryId, kind: 'done' | 'planned' | 'running', start, end, cutStart, cutEnd, lane }]
+  // Справи, що накладаються, отримують різні доріжки (lane), щоб їх було видно обидві.
+  function timelineItems(tasks, key, timer, now) {
+    const dayFrom = T.dayStart(key);
+    const dayTo = T.dayEnd(key);
+    const linked = timerTask(tasks, timer);
+    const items = [];
+    const add = (id, categoryId, kind, slot) => {
+      if (!isTimed(slot)) return;
+      const start = Math.max(slot.start, dayFrom);
+      const end = Math.min(slot.end, dayTo);
+      // Щойно запущений таймер ще має нульову довжину, але його вже треба показати
+      if (end < start || (end === start && kind !== 'running')) return;
+      items.push({ id, categoryId, kind, start, end, cutStart: slot.start < dayFrom, cutEnd: slot.end > dayTo });
+    };
+    for (const task of tasks) {
+      // Для справи з запущеним таймером малюємо таймер, а не її план
+      if (linked && task.id === linked.id) continue;
+      add(task.id, task.categoryId, task.fact ? 'done' : 'planned', currentSlot(task));
+    }
+    if (timer) add(linked ? linked.id : 'timer', timer.categoryId, 'running', timerSlot(timer, now));
+    items.sort((a, b) => a.start - b.start || b.end - a.end);
+    const laneEnds = [];
+    for (const item of items) {
+      let lane = laneEnds.findIndex((end) => end <= item.start);
+      if (lane === -1) {
+        lane = laneEnds.length;
+        laneEnds.push(0);
+      }
+      laneEnds[lane] = item.end;
+      item.lane = lane;
+    }
+    return items;
+  }
+
+  // Межі шкали дня key: від підйому до відбою, розширені, якщо справи виходять
+  // за ці межі; округлені до цілих годин і обрізані північчю.
+  function timelineRange(schedules, tasks, key, timer, now) {
+    const w = dayWindow(schedules, key);
+    let from = w.wake;
+    let to = w.sleep;
+    for (const item of timelineItems(tasks, key, timer, now)) {
+      from = Math.min(from, item.start);
+      to = Math.max(to, item.end);
+    }
+    return {
+      from: Math.max(T.dayStart(key), floorHour(from)),
+      to: Math.min(T.dayEnd(key), ceilHour(to)),
+    };
+  }
+
+  // Через скільки годин підписувати шкалу, щоб підписи не налазили один на одного
+  // (на один підпис «07:00» з відступом треба приблизно 56 пікселів)
+  function pickTickStep(hours, widthPx) {
+    for (const step of [1, 2, 3, 4, 6]) {
+      if ((hours / step) * 56 <= widthPx) return step;
+    }
+    return 12;
+  }
+
   TB.calc = {
     scheduleFor, scheduleError, dayWindow, dayBudget, plainBudget, dayPhase,
     isTimed, slotDay, slotLength, slotOnDay, currentSlot, timerTask, timerSlot, tasksForDay,
     usedOnDay, freeBudget, timeLeft, plannedLeft, overplan, unionLength, lostTime, overlaps,
+    slotConflicts, timerResult, suggestTimerEnd, timerEndError,
+    timelineItems, timelineRange, pickTickStep,
   };
 })();
