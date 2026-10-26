@@ -1,0 +1,10 @@
+{
+  "name": "time-budget",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Бюджет часу — локальна сторінка для тайм-менеджменту",
+  "type": "commonjs",
+  "scripts": {
+    "test": "TZ=Europe/Warsaw node --test"
+  }
+}
