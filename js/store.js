@@ -13,6 +13,8 @@
 
   const STORAGE_KEY = 'timeBudget';
   const VERSION = 1;
+  const APP_ID = 'time-budget'; // позначка у файлі резервної копії
+  const MAX_BACKUP_BYTES = 10 * 1024 * 1024; // більший файл — точно не наша копія
 
   // Кольори категорій. Порядок і відтінки перевірено: сусідні кольори добре
   // розрізняються на темному тлі, зокрема людьми з порушеннями кольорового зору.
@@ -177,9 +179,9 @@
   }
 
   // Читає дані зі сховища браузера. status:
-  //   'empty'       — даних ще немає (перший запуск),
-  //   'ok'          — усе гаразд (problems — що довелося виправити),
-  //   'corrupt'     — дані пошкоджені, raw — те, що вдалося прочитати,
+  //   'empty'       — даних немає (перший запуск або все видалено),
+  //   'ok'          — усе гаразд; якщо щось довелося виправити — problems і raw (початковий запис),
+  //   'corrupt'     — дані пошкоджені, raw — те, що лежить у сховищі,
   //   'unavailable' — браузер не дає доступу до сховища.
   function load() {
     let raw;
@@ -191,7 +193,7 @@
     if (raw == null || raw.trim() === '') return { status: 'empty', data: defaultData(), problems: [] };
     try {
       const { data, problems } = normalize(JSON.parse(raw));
-      return { status: 'ok', data, problems };
+      return problems.length ? { status: 'ok', data, problems, raw } : { status: 'ok', data, problems };
     } catch (error) {
       const reason = error instanceof SyntaxError ? 'Запис пошкоджено, його не вдається прочитати.' : error.message;
       return { status: 'corrupt', raw, error: reason };
@@ -201,6 +203,80 @@
   // Записує дані. Якщо браузер не дає записати — кидає помилку
   function save(data) {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+  }
+
+  // Видаляє всі дані зі сховища. Повертає текст помилки або null
+  function clear() {
+    try {
+      localStorage.removeItem(STORAGE_KEY);
+      return null;
+    } catch (error) {
+      return describeError(error);
+    }
+  }
+
+  /* ---------- Резервна копія ---------- */
+
+  // Вміст файлу копії: позначка програми, версія, час експорту і самі дані
+  function exportText(data, now) {
+    return JSON.stringify({ app: APP_ID, version: VERSION, exportedAt: new Date(now).toISOString(), data }, null, 2);
+  }
+
+  // time-budget-2026-10-26-1845.json
+  function backupFileName(now) {
+    return APP_ID + '-' + T.dayKeyOf(now) + '-' + T.timeOf(now).replace(':', '') + '.json';
+  }
+
+  // Перевіряє файл копії ДО того, як щось замінювати.
+  // Повертає { ok: true, data, problems, exportedAt } або { ok: false, error } з поясненням.
+  function parseBackup(text, size) {
+    if ((size || String(text || '').length) > MAX_BACKUP_BYTES) {
+      return { ok: false, error: 'Файл завеликий — це не схоже на резервну копію.' };
+    }
+    if (typeof text !== 'string' || text.trim() === '') return { ok: false, error: 'Файл порожній.' };
+    let parsed;
+    try {
+      parsed = JSON.parse(text);
+    } catch (error) {
+      return { ok: false, error: 'Файл пошкоджений або це не файл копії (JSON): його не вдається прочитати.' };
+    }
+    let raw = parsed;
+    let exportedAt = null;
+    // Файл з експорту має «конверт» { app, version, exportedAt, data }.
+    // Без конверта приймаємо й самі дані — так, як вони лежать у сховищі.
+    if (isObject(parsed) && 'app' in parsed) {
+      if (parsed.app !== APP_ID || !isObject(parsed.data)) {
+        return { ok: false, error: 'Це файл іншої програми, а не резервна копія «Бюджету часу».' };
+      }
+      if (typeof parsed.version === 'number' && parsed.version > VERSION) {
+        return { ok: false, error: 'Цю копію зроблено новішою версією програми.' };
+      }
+      raw = parsed.data;
+      const time = Date.parse(parsed.exportedAt);
+      exportedAt = Number.isFinite(time) ? time : null;
+    }
+    let result;
+    try {
+      result = normalize(raw);
+    } catch (error) {
+      return { ok: false, error: error.message };
+    }
+    if (raw.tasks.length > 0 && result.data.tasks.length === 0) {
+      return { ok: false, error: 'У файлі немає жодної неушкодженої справи — схоже, копію пошкоджено.' };
+    }
+    return { ok: true, data: result.data, problems: result.problems, exportedAt };
+  }
+
+  // Що всередині копії — для вікна підтвердження: кількість справ, категорій і період
+  function describeBackup(data) {
+    const days = data.tasks.map((task) => C.slotDay(C.currentSlot(task))).sort();
+    return {
+      tasks: data.tasks.length,
+      categories: data.categories.filter((c) => !c.archived).length,
+      from: days[0] || null,
+      to: days[days.length - 1] || null,
+      timer: !!data.timer,
+    };
   }
 
   // Зрозуміле пояснення, чому не вдалося зберегти
@@ -216,7 +292,8 @@
   }
 
   TB.store = {
-    STORAGE_KEY, VERSION, PALETTE, DEFAULT_CATEGORIES, MAX_TITLE, MAX_CATEGORY_NAME, MAX_SLOT,
-    defaultData, newId, normalize, load, save, describeError,
+    STORAGE_KEY, VERSION, APP_ID, PALETTE, DEFAULT_CATEGORIES, MAX_TITLE, MAX_CATEGORY_NAME, MAX_SLOT,
+    defaultData, newId, normalize, load, save, clear, describeError,
+    exportText, backupFileName, parseBackup, describeBackup,
   };
 })();

@@ -31,6 +31,9 @@
     weekEnd: '', // останній день тижня, який показують «Підсумки»
     weekPick: null, // день, вибраний на графіку тижня
     weekTableOpen: false, // чи розгорнута таблиця по днях
+    corrupt: null, // пошкоджені дані у сховищі: { error, raw } — тоді показуємо екран порятунку
+    loadIssue: null, // частину даних виправлено під час читання: { problems, raw }
+    ticking: false, // чи запущено щосекундне оновлення
   };
 
   const TABS = [
@@ -60,6 +63,8 @@
     play: '<polygon points="6 3 20 12 6 21 6 3"/>',
     stop: '<rect x="6" y="6" width="12" height="12" rx="2"/>',
     clock: '<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>',
+    download: '<path d="M12 15V3"/><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/>',
+    upload: '<path d="M12 3v12"/><path d="m17 8-5-5-5 5"/><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>',
   };
 
   /* ---------- Дрібні помічники ---------- */
@@ -189,7 +194,7 @@
     const main = state.tab === 'settings' ? renderSettings()
       : state.tab === 'summary' ? renderSummary()
         : renderToday();
-    app.innerHTML = renderTopbar() + '<main class="wrap" id="main">' + renderSaveError() + main + '</main>';
+    app.innerHTML = renderTopbar() + '<main class="wrap" id="main">' + renderSaveError() + renderLoadIssue() + main + '</main>';
     restoreFocus(focused);
     updateLive();
   }
@@ -227,7 +232,27 @@
     if (!state.saveError) return '';
     return `
       <div class="alert danger" role="alert">${icon('alert')}
-        <div><b>Дані не зберігаються.</b> ${esc(state.saveError)} Зміни зникнуть, щойно закриєш сторінку.</div>
+        <div><b>Дані не зберігаються.</b> ${esc(state.saveError)} Зміни зникнуть, щойно закриєш сторінку.
+          <div class="alert-actions">
+            <button type="button" class="btn small" data-action="data-export">${icon('download')}Зберегти копію у файл</button>
+          </div>
+        </div>
+      </div>`;
+  }
+
+  // Під час читання частину даних довелося пропустити — кажемо про це й даємо врятувати початковий запис
+  function renderLoadIssue() {
+    if (!state.loadIssue) return '';
+    return `
+      <div class="alert warn" role="alert">${icon('alert')}
+        <div><b>Частину збережених даних пошкоджено.</b> Програма працює з тим, що вдалося прочитати
+          (${esc(state.loadIssue.problems.join('; '))}).
+          <div class="alert-actions">
+            <button type="button" class="btn small" data-action="issue-download">${icon('download')}Завантажити початковий запис</button>
+            <button type="button" class="btn small" data-action="data-import">${icon('upload')}Імпортувати з копії</button>
+            <button type="button" class="btn small" data-action="issue-dismiss">Зрозуміло</button>
+          </div>
+        </div>
       </div>`;
   }
 
@@ -718,6 +743,7 @@
           <p class="empty-title">Почнімо!</p>
           <p>Між підйомом і відбоєм у тебе ${budget}. Додай першу справу, наприклад «Навчання, 4 год», або натисни категорію в «Почати зараз» — піде таймер.</p>
           ${addButton}
+          <p class="hint">Є резервна копія? <button type="button" class="link inline" data-action="data-import">Імпортувати дані</button></p>
         </div>`;
     }
     return `
@@ -1296,7 +1322,179 @@
           <h3 class="subhead">Приховані категорії</h3>
           <p class="hint">Їх видалено, але в них є старі справи. Нові справи сюди додати не можна.</p>
           <ul class="cat-list">${archivedRows}</ul>` : ''}
+      </section>
+      ${renderDataCard()}`;
+  }
+
+  function renderDataCard() {
+    const n = state.data.tasks.length;
+    return `
+      <section class="card">
+        <h2>Дані</h2>
+        <p class="hint">Усе зберігається лише в цьому браузері на цьому комп’ютері й нікуди не відправляється. Зараз: ${n} ${T.plural(n, 'справа', 'справи', 'справ')}.</p>
+        <div class="data-actions">
+          <button type="button" class="btn primary" data-action="data-export">${icon('download')}Експортувати дані</button>
+          <button type="button" class="btn" data-action="data-import">${icon('upload')}Імпортувати дані</button>
+        </div>
+        <p class="hint">Експорт зберігає файл-копію (JSON), зазвичай у папку «Завантаження». Імпорт відновлює дані з такого файлу: програма спершу перевірить файл і спитає підтвердження.</p>
+        <div class="danger-zone">
+          <button type="button" class="btn danger-outline" data-action="data-wipe">${icon('trash')}Видалити всі дані</button>
+        </div>
       </section>`;
+  }
+
+  /* ---------- Резервна копія: експорт, імпорт, видалення ---------- */
+
+  // Віддає браузеру файл на збереження (як звичайне завантаження)
+  function downloadFile(name, text, type) {
+    const url = URL.createObjectURL(new Blob([text], { type }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = name;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  // Зберігає копію всіх даних у файл. Повертає назву файлу
+  function exportData() {
+    const now = Date.now();
+    const name = S.backupFileName(now);
+    downloadFile(name, S.exportText(state.data, now), 'application/json');
+    return name;
+  }
+
+  // Початковий (пошкоджений) запис зі сховища — у текстовий файл, щоб нічого не загубити
+  function downloadDamaged(raw) {
+    const now = Date.now();
+    downloadFile(S.APP_ID + '-damaged-' + T.dayKeyOf(now) + '-' + T.timeOf(now).replace(':', '') + '.txt', raw, 'text/plain');
+  }
+
+  // «26.10.2026, 18:45»
+  function formatStamp(ms) {
+    const date = new Date(ms);
+    return T.pad2(date.getDate()) + '.' + T.pad2(date.getMonth() + 1) + '.' + date.getFullYear() + ', ' + T.timeOf(ms);
+  }
+
+  function chooseImportFile() {
+    const input = document.getElementById('import-file');
+    input.value = '';
+    input.click();
+  }
+
+  // Імпорт: спершу перевіряємо файл, потім показуємо, що в ньому, і лише після «Замінити дані» замінюємо
+  async function importFile(file) {
+    let text;
+    try {
+      text = await file.text();
+    } catch (error) {
+      await confirmBox({ title: 'Не вдалося прочитати файл', text: 'Браузер не зміг відкрити «' + file.name + '». Твої дані не змінено.', ok: 'Зрозуміло', cancel: null });
+      return;
+    }
+    const result = S.parseBackup(text, file.size);
+    if (!result.ok) {
+      await confirmBox({ title: 'Цей файл не підходить', text: result.error + ' Твої дані не змінено.', ok: 'Зрозуміло', cancel: null });
+      return;
+    }
+    const info = S.describeBackup(result.data);
+    const period = !info.from ? '' : info.from === info.to
+      ? ' (' + T.formatDayMonth(info.from, todayKey()) + ')'
+      : ' (' + T.formatDayRange(info.from, info.to, todayKey()) + ')';
+    const items = ['справ: ' + info.tasks + period, 'категорій: ' + info.categories];
+    if (info.timer) items.push('у копії йде таймер — після імпорту програма спитає, що з ним робити');
+    const now = state.data
+      ? 'Зараз у програмі справ: ' + state.data.tasks.length + '. Усі поточні дані буде замінено даними з копії.'
+      : 'Пошкоджені дані буде замінено даними з копії.';
+    const ok = await confirmBox({
+      title: 'Замінити дані копією?',
+      html: `
+        <p>Файл «${esc(file.name)}»${result.exportedAt ? ', копія від ' + esc(formatStamp(result.exportedAt)) : ''}.</p>
+        <ul class="plain-list">${items.map((item) => '<li>' + esc(item) + '</li>').join('')}</ul>
+        ${result.problems.length ? `<p class="form-warn">У файлі є пошкоджені записи (${esc(result.problems.join('; '))}). Їх буде пропущено.</p>` : ''}
+        <p>${esc(now)}</p>`,
+      ok: 'Замінити дані',
+      danger: true,
+      extra: state.data && state.data.tasks.length
+        ? { label: 'Спершу зберегти поточні', onClick: () => (exportData(), 'Копію збережено ✓') }
+        : null,
+    });
+    if (!ok) return;
+    const wasCorrupt = !state.data;
+    state.data = result.data;
+    state.corrupt = null;
+    state.loadIssue = null;
+    persist();
+    if (wasCorrupt) startApp();
+    else {
+      resetView();
+      render();
+    }
+    toast('Дані відновлено з копії: ' + info.tasks + ' ' + T.plural(info.tasks, 'справа', 'справи', 'справ') + '.');
+    openForgottenTimer();
+  }
+
+  async function wipeData() {
+    const count = state.data.tasks.length;
+    const ok = await confirmBox({
+      title: 'Видалити всі дані?',
+      text: 'Зникнуть усі справи (' + count + '), категорії й налаштування. Скасувати це не можна.',
+      ok: 'Видалити все',
+      danger: true,
+      extra: count ? { label: 'Спершу зберегти копію', onClick: () => (exportData(), 'Копію збережено ✓') } : null,
+    });
+    if (!ok) return;
+    const error = S.clear();
+    state.data = S.defaultData();
+    state.loadIssue = null;
+    state.saveError = error;
+    resetView();
+    render();
+    toast(error ? 'Не вдалося видалити дані зі сховища.' : 'Усі дані видалено.', error ? 'error' : '');
+  }
+
+  // Екран, коли дані у сховищі пошкоджені: нічого не змінюємо, доки людина не вибере
+  function renderCorrupt() {
+    app.innerHTML = `
+      <header class="topbar">
+        <div class="topbar-inner"><div class="brand">${icon('hourglass')}<span>Бюджет часу</span></div></div>
+      </header>
+      <main class="wrap">
+        <section class="card corrupt">
+          <h1>${icon('alert')}Збережені дані пошкоджені</h1>
+          <p>${esc(state.corrupt.error)}</p>
+          <p class="hint">Я нічого не змінюю, доки ти не вибереш, що робити.</p>
+          <ol class="steps">
+            <li>
+              <button type="button" class="btn primary" data-action="data-import">${icon('upload')}Імпортувати з резервної копії</button>
+              <span class="hint">Якщо в тебе є файл-копія, дані відновляться з нього.</span>
+            </li>
+            <li>
+              <button type="button" class="btn" data-action="corrupt-download">${icon('download')}Завантажити пошкоджений запис</button>
+              <span class="hint">Збереже те, що є зараз, у файл — про всяк випадок.</span>
+            </li>
+            <li>
+              <button type="button" class="btn danger-outline" data-action="corrupt-reset">${icon('trash')}Почати з нуля</button>
+              <span class="hint">Видалить пошкоджений запис і відкриє порожню програму.</span>
+            </li>
+          </ol>
+        </section>
+      </main>`;
+  }
+
+  async function resetCorrupt() {
+    const ok = await confirmBox({
+      title: 'Почати з нуля?',
+      text: 'Пошкоджений запис буде видалено назавжди. Якщо хочеш його зберегти, спершу натисни «Завантажити пошкоджений запис».',
+      ok: 'Почати з нуля',
+      danger: true,
+    });
+    if (!ok) return;
+    const error = S.clear();
+    state.corrupt = null;
+    state.data = S.defaultData();
+    state.saveError = error;
+    startApp();
   }
 
   function schedulePreview(wake, sleep) {
@@ -1430,21 +1628,30 @@
     if (dialog.open) dialog.close();
   }
 
-  // Питання «так / ні» у вікні. Повертає Promise<boolean>
-  function confirmBox({ title, text = '', ok = 'Так', danger = false }) {
+  // Питання «так / ні» у вікні. Повертає Promise<boolean>.
+  // html — готовий вміст замість text; cancel: null — лише одна кнопка (повідомлення);
+  // extra — додаткова кнопка { label, onClick }, що не закриває вікно (onClick повертає новий підпис)
+  function confirmBox({ title, text = '', html = '', ok = 'Так', cancel = 'Скасувати', danger = false, extra = null }) {
     return new Promise((resolve) => {
       openDialog(`
         <div class="sheet">
           <h2>${esc(title)}</h2>
-          ${text ? `<p>${esc(text)}</p>` : ''}
+          ${html || (text ? `<p>${esc(text)}</p>` : '')}
           <footer class="sheet-foot">
-            <button type="button" class="btn" data-answer="no">Скасувати</button>
+            ${cancel ? `<button type="button" class="btn" data-answer="no">${esc(cancel)}</button>` : ''}
+            ${extra ? `<button type="button" class="btn" data-answer="extra">${esc(extra.label)}</button>` : ''}
             <button type="button" class="btn ${danger ? 'danger' : 'primary'}" data-answer="yes">${esc(ok)}</button>
           </footer>
         </div>`);
       const onClick = (event) => {
         const button = event.target.closest('[data-answer]');
-        if (button) finish(button.dataset.answer === 'yes');
+        if (!button) return;
+        if (button.dataset.answer === 'extra') {
+          button.textContent = extra.onClick();
+          button.disabled = true;
+          return;
+        }
+        finish(button.dataset.answer === 'yes');
       };
       const onClose = () => finish(false);
       function finish(answer) {
@@ -1465,17 +1672,6 @@
     el.textContent = text;
     toasts.replaceChildren(el);
     setTimeout(() => el.remove(), tone === 'error' ? 6000 : 3000);
-  }
-
-  function renderCorrupt(result) {
-    app.innerHTML = `
-      <main class="wrap">
-        <section class="card">
-          <h1>Збережені дані пошкоджені</h1>
-          <p class="hint">${esc(result.error)}</p>
-          <p class="hint">Я нічого не змінюю, доки ти не вирішиш, що робити.</p>
-        </section>
-      </main>`;
   }
 
   /* ---------- Події ---------- */
@@ -1571,6 +1767,30 @@
           col.setAttribute('aria-pressed', String(on));
         });
         showWeekDetail(state.weekPick || id);
+        break;
+      case 'data-export':
+        toast('Копію збережено: ' + exportData() + ' (зазвичай у папці «Завантаження»).');
+        break;
+      case 'data-import':
+        chooseImportFile();
+        break;
+      case 'data-wipe':
+        wipeData();
+        break;
+      case 'issue-download':
+        downloadDamaged(state.loadIssue.raw);
+        break;
+      case 'issue-dismiss':
+        // Людина побачила попередження — зберігаємо виправлені дані
+        state.loadIssue = null;
+        persist();
+        render();
+        break;
+      case 'corrupt-download':
+        downloadDamaged(state.corrupt.raw);
+        break;
+      case 'corrupt-reset':
+        resetCorrupt();
         break;
       case 'cat-add':
         openCategoryForm(null);
@@ -1672,8 +1892,15 @@
     dialog.innerHTML = '';
   });
 
+  // Вибрали файл для імпорту
+  document.getElementById('import-file').addEventListener('change', (event) => {
+    const file = event.target.files && event.target.files[0];
+    if (file) importFile(file);
+  });
+
   // Щосекунди: оновити «живі» частини; щохвилини — увесь екран; опівночі — перейти на новий день
   function tick() {
+    if (!state.data) return; // відкрито екран пошкоджених даних
     const now = Date.now();
     const key = T.dayKeyOf(now);
     const minute = Math.floor(now / T.MINUTE);
@@ -1726,25 +1953,38 @@
 
   /* ---------- Запуск ---------- */
 
+  // Після імпорту чи видалення даних — назад до сьогоднішнього дня
+  function resetView() {
+    state.today = todayKey();
+    state.day = state.today;
+    state.weekEnd = state.today;
+    state.weekPick = null;
+  }
+
+  function startApp() {
+    resetView();
+    state.minute = Math.floor(Date.now() / T.MINUTE);
+    render();
+    if (!state.ticking) {
+      setInterval(tick, 1000);
+      state.ticking = true;
+    }
+  }
+
   function init() {
     const result = S.load();
     if (result.status === 'corrupt') {
-      renderCorrupt(result);
+      // Пошкоджені дані не чіпаємо: показуємо екран із варіантами порятунку
+      state.corrupt = result;
+      renderCorrupt();
       return;
     }
     state.data = result.data;
     if (result.status === 'unavailable') state.saveError = result.error;
-    state.today = todayKey();
-    state.day = state.today;
-    state.weekEnd = state.today;
-    state.minute = Math.floor(Date.now() / T.MINUTE);
-    render();
-    if (result.problems.length) {
-      toast('Частину даних було пошкоджено й виправлено: ' + result.problems.join('; ') + '.', 'error');
-    }
+    if (result.problems.length) state.loadIssue = { problems: result.problems, raw: result.raw };
+    startApp();
     // Таймер іде ще з минулого разу — питаємо, чи його не забули вимкнути
     openForgottenTimer();
-    setInterval(tick, 1000);
   }
 
   init();
