@@ -34,6 +34,7 @@
     corrupt: null, // пошкоджені дані у сховищі: { error, raw } — тоді показуємо екран порятунку
     loadIssue: null, // частину даних виправлено під час читання: { problems, raw }
     ticking: false, // чи запущено щосекундне оновлення
+    updateReady: false, // на сайті з'явилась нова версія програми (див. sw.js)
   };
 
   const TABS = [
@@ -46,9 +47,9 @@
 
   const KIND_LABEL = { done: 'виконано', planned: 'заплановано', running: 'іде зараз' };
 
-  // Значки з набору Lucide (lucide.dev, ліцензія ISC)
+  // Значки з набору Lucide (lucide.dev, ліцензія ISC). ring — власний: кільце-«бюджет», як іконка програми
   const ICONS = {
-    hourglass: '<path d="M5 22h14"/><path d="M5 2h14"/><path d="M17 22v-4.172a2 2 0 0 0-.586-1.414L12 12l-4.414 4.414A2 2 0 0 0 7 17.828V22"/><path d="M7 2v4.172a2 2 0 0 0 .586 1.414L12 12l4.414-4.414A2 2 0 0 0 17 6.172V2"/>',
+    ring: '<circle cx="12" cy="12" r="8" stroke="#3a3a37" stroke-width="3"/><path d="M12 4A8 8 0 1 1 4.75 15.38" stroke-width="3"/>',
     sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/>',
     chart: '<path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/>',
     sliders: '<path d="M21 4h-7"/><path d="M10 4H3"/><path d="M21 12h-9"/><path d="M8 12H3"/><path d="M21 20h-5"/><path d="M12 20H3"/><path d="M14 2v4"/><path d="M8 10v4"/><path d="M16 18v4"/>',
@@ -194,7 +195,8 @@
     const main = state.tab === 'settings' ? renderSettings()
       : state.tab === 'summary' ? renderSummary()
         : renderToday();
-    app.innerHTML = renderTopbar() + '<main class="wrap" id="main">' + renderSaveError() + renderLoadIssue() + main + '</main>';
+    app.innerHTML = renderTopbar() + '<main class="wrap" id="main">'
+      + renderUpdateNotice() + renderSaveError() + renderLoadIssue() + main + '</main>';
     restoreFocus(focused);
     updateLive();
   }
@@ -221,11 +223,23 @@
     return `
       <header class="topbar">
         <div class="topbar-inner">
-          <div class="brand">${icon('hourglass')}<span>Бюджет часу</span></div>
+          <div class="brand">${icon('ring')}<span>Бюджет часу</span></div>
           <nav class="tabs" aria-label="Розділи" style="--tabs:${TABS.length}">${tabs}</nav>
           <span class="clock" id="clock" aria-label="Зараз"></span>
         </div>
       </header>`;
+  }
+
+  function renderUpdateNotice() {
+    if (!state.updateReady) return '';
+    return `
+      <div class="alert info" role="status">${icon('download')}
+        <div><b>Є нова версія програми.</b> Твої дані залишаться на місці.
+          <div class="alert-actions">
+            <button type="button" class="btn small" data-action="app-reload">Оновити</button>
+          </div>
+        </div>
+      </div>`;
   }
 
   function renderSaveError() {
@@ -1357,12 +1371,34 @@
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 
-  // Зберігає копію всіх даних у файл. Повертає назву файлу
+  // Зберігає копію всіх даних. На комп'ютері — звичайним завантаженням файлу,
+  // на телефоні — через меню «Поділитися» (зберегти у «Файли», AirDrop, месенджер).
+  // Повертає { name, shared }
   function exportData() {
     const now = Date.now();
     const name = S.backupFileName(now);
-    downloadFile(name, S.exportText(state.data, now), 'application/json');
-    return name;
+    const text = S.exportText(state.data, now);
+    if (shareFile(name, text)) return { name, shared: true };
+    downloadFile(name, text, 'application/json');
+    return { name, shared: false };
+  }
+
+  // Меню «Поділитися» є лише на сенсорних пристроях, і то не всюди. true — якщо його відкрито
+  function shareFile(name, text) {
+    if (!navigator.canShare || !matchMedia('(pointer: coarse)').matches) return false;
+    const file = new File([text], name, { type: 'application/json' });
+    if (!navigator.canShare({ files: [file] })) return false;
+    navigator.share({ files: [file], title: name }).catch((error) => {
+      // Меню просто закрили — нічого не робимо; інша помилка — завантажуємо звичайним способом
+      if (error.name !== 'AbortError') downloadFile(name, text, 'application/json');
+    });
+    return true;
+  }
+
+  function exportToast(result) {
+    return result.shared
+      ? 'Вибери, куди зберегти копію «' + result.name + '»: «Зберегти у Файли», AirDrop чи месенджер.'
+      : 'Копію збережено: ' + result.name + ' (зазвичай у папці «Завантаження»).';
   }
 
   // Початковий (пошкоджений) запис зі сховища — у текстовий файл, щоб нічого не загубити
@@ -1416,7 +1452,7 @@
       ok: 'Замінити дані',
       danger: true,
       extra: state.data && state.data.tasks.length
-        ? { label: 'Спершу зберегти поточні', onClick: () => (exportData(), 'Копію збережено ✓') }
+        ? { label: 'Спершу зберегти поточні', onClick: () => (exportData().shared ? 'Копію передано ✓' : 'Копію збережено ✓') }
         : null,
     });
     if (!ok) return;
@@ -1441,7 +1477,9 @@
       text: 'Зникнуть усі справи (' + count + '), категорії й налаштування. Скасувати це не можна.',
       ok: 'Видалити все',
       danger: true,
-      extra: count ? { label: 'Спершу зберегти копію', onClick: () => (exportData(), 'Копію збережено ✓') } : null,
+      extra: count
+        ? { label: 'Спершу зберегти копію', onClick: () => (exportData().shared ? 'Копію передано ✓' : 'Копію збережено ✓') }
+        : null,
     });
     if (!ok) return;
     const error = S.clear();
@@ -1457,7 +1495,7 @@
   function renderCorrupt() {
     app.innerHTML = `
       <header class="topbar">
-        <div class="topbar-inner"><div class="brand">${icon('hourglass')}<span>Бюджет часу</span></div></div>
+        <div class="topbar-inner"><div class="brand">${icon('ring')}<span>Бюджет часу</span></div></div>
       </header>
       <main class="wrap">
         <section class="card corrupt">
@@ -1769,7 +1807,10 @@
         showWeekDetail(state.weekPick || id);
         break;
       case 'data-export':
-        toast('Копію збережено: ' + exportData() + ' (зазвичай у папці «Завантаження»).');
+        toast(exportToast(exportData()));
+        break;
+      case 'app-reload':
+        location.reload();
         break;
       case 'data-import':
         chooseImportFile();
@@ -1898,13 +1939,22 @@
     if (file) importFile(file);
   });
 
+  // Поки кнопка миші чи палець натиснуті, екран не перемальовуємо: інакше кнопка
+  // зникла б посеред натискання, і воно б «загубилось»
+  let pointerDown = false;
+  document.addEventListener('pointerdown', () => { pointerDown = true; }, true);
+  document.addEventListener('pointerup', () => { pointerDown = false; }, true);
+  document.addEventListener('pointercancel', () => { pointerDown = false; }, true);
+
   // Щосекунди: оновити «живі» частини; щохвилини — увесь екран; опівночі — перейти на новий день
   function tick() {
     if (!state.data) return; // відкрито екран пошкоджених даних
     const now = Date.now();
     const key = T.dayKeyOf(now);
     const minute = Math.floor(now / T.MINUTE);
-    if (key !== state.today) {
+    if (pointerDown) {
+      updateLive(); // перемалюємо через секунду, коли натискання закінчиться
+    } else if (key !== state.today) {
       if (state.day === state.today) state.day = key;
       if (state.weekEnd === state.today) state.weekEnd = key;
       state.today = key;
@@ -1971,7 +2021,26 @@
     }
   }
 
+  // Робота без інтернету й встановлення на телефон (PWA).
+  // Service worker працює лише на сайті (https) або на localhost — не для файлу з диска.
+  function setupOffline() {
+    const local = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+    if (!('serviceWorker' in navigator) || !(location.protocol === 'https:' || local)) return;
+    navigator.serviceWorker.addEventListener('message', (event) => {
+      if (event.data && event.data.type === 'update-ready' && !state.updateReady) {
+        state.updateReady = true;
+        if (state.data) render();
+      }
+    });
+    navigator.serviceWorker.register('sw.js').catch(() => {
+      // Без service worker програма працює так само, лише не відкриється без інтернету
+    });
+    // Просимо браузер не видаляти дані цього сайту, коли бракує місця
+    if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
+  }
+
   function init() {
+    setupOffline();
     const result = S.load();
     if (result.status === 'corrupt') {
       // Пошкоджені дані не чіпаємо: показуємо екран із варіантами порятунку

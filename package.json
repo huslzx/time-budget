@@ -5,6 +5,7 @@
   "description": "Бюджет часу — локальна сторінка для тайм-менеджменту",
   "type": "commonjs",
   "scripts": {
-    "test": "TZ=Europe/Warsaw node --test"
+    "test": "TZ=Europe/Warsaw node --test",
+    "icons": "node tools/make-icons.js"
   }
 }

@@ -78,8 +78,14 @@ input {
   color: inherit;
 }
 
+/* На телефоні замість сірого спалаху при дотику — легке підсвічування кнопки */
 button {
   cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+button:active:not(:disabled) {
+  filter: brightness(1.2);
 }
 
 :focus-visible {
@@ -476,6 +482,15 @@ button {
 
 .alert.danger .icon {
   color: var(--danger);
+}
+
+.alert.info {
+  background: rgba(109, 167, 236, 0.08);
+  border-color: rgba(109, 167, 236, 0.45);
+}
+
+.alert.info .icon {
+  color: var(--accent-text);
 }
 
 .alert-list {
